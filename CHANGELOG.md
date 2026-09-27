@@ -2,6 +2,18 @@
 
 ## Untagged
 
+## [8.10.0](https://github.com/GoogleCloudPlatform/professional-services-data-validator/compare/v8.9.3...v8.10.0) (2026-09-27)
+
+
+### Features
+
+* Extend configs run with config-dir to support all validation types (not only table-partitions) ([#1828](https://github.com/GoogleCloudPlatform/professional-services-data-validator/issues/1828)) ([552f460](https://github.com/GoogleCloudPlatform/professional-services-data-validator/commit/552f46080848c9fb75e08ef994c8c2af3bf38e00))
+
+
+### Documentation
+
+* explain Oracle DBMS_RANDOM access ([#1798](https://github.com/GoogleCloudPlatform/professional-services-data-validator/issues/1798)) ([ae359b6](https://github.com/GoogleCloudPlatform/professional-services-data-validator/commit/ae359b635aebb0d280eb30a1f249db97101c7e2e))
+
 ## [8.9.3](https://github.com/GoogleCloudPlatform/professional-services-data-validator/compare/v8.9.2...v8.9.3) (2026-08-27)
 
 
