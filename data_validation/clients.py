@@ -183,6 +183,8 @@ def get_bigquery_client(
     api_endpoint: Optional[str] = None,
     storage_api_endpoint: Optional[str] = None,
     storage_api_insecure_channel: bool = False,
+    storage_api_disabled: bool = False,
+    anonymous_credentials: bool = False,
     client_project_id: Optional[str] = None,  # to be deprecated in the future
     billing_project_id: Optional[str] = None,
 ):
@@ -191,14 +193,23 @@ def get_bigquery_client(
             "client_project_id is deprecated and will be removed in the future, use --billing-project-id instead"
         )
         billing_project_id = client_project_id
+    if anonymous_credentials and credentials is None:
+        # A local BigQuery emulator needs no Google identity - and a machine running one often
+        # has none, so the default (application-default credentials) would fail outright.
+        from google.auth.credentials import AnonymousCredentials
+
+        credentials = AnonymousCredentials()
     google_client = get_google_bigquery_client(
         project_id,
         credentials=credentials,
         api_endpoint=api_endpoint,
-        quota_project_id=billing_project_id,
+        # anonymous: name the project outright - left None, the client looks it up through
+        # application-default credentials, the very lookup anonymous mode exists to avoid
+        quota_project_id=billing_project_id
+        or (project_id if anonymous_credentials else None),
     )
     bqstorage_client = None
-    if storage_api_endpoint:
+    if storage_api_endpoint and not storage_api_disabled:
         bqstorage_client = _get_google_bqstorage_client(
             credentials=credentials,
             api_endpoint=storage_api_endpoint,
@@ -212,6 +223,7 @@ def get_bigquery_client(
         credentials=credentials,
         bigquery_client=google_client,
         bqstorage_client=bqstorage_client,
+        storage_api_disabled=storage_api_disabled,
     )
 
 

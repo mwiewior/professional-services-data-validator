@@ -22,6 +22,7 @@ def bigquery_connect(
     credentials=None,
     bigquery_client=None,
     bqstorage_client=None,
+    storage_api_disabled: bool = False,
 ):
     """Create a BigQuery Backend for use with Ibis."""
     backend = BigQueryBackend()
@@ -31,5 +32,6 @@ def bigquery_connect(
         credentials=credentials,
         client=bigquery_client,
         storage_client=bqstorage_client,
+        storage_api_disabled=storage_api_disabled,
     )
     return backend

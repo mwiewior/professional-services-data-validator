@@ -103,6 +103,17 @@ CONNECTION_SOURCE_FIELDS = {
             "- for a local BigQuery emulator that serves its Storage API port without TLS "
             "(defaults to False)",
         ],
+        [
+            "storage_api_disabled",
+            "(Optional) Never use the BigQuery Storage API: read every query result through the "
+            "REST API instead - for a local BigQuery emulator whose Storage API cannot serve "
+            "query results (defaults to False)",
+        ],
+        [
+            "anonymous_credentials",
+            "(Optional) Connect without Google credentials - for a local BigQuery emulator "
+            "reached through --api-endpoint (defaults to False)",
+        ],
     ],
     consts.SOURCE_TYPE_TERADATA: [
         ["host", "Teradata host"],
@@ -601,12 +612,19 @@ def _configure_database_specific_parsers(parser):
             if (
                 field_obj[0] == "thick_mode" and database == consts.SOURCE_TYPE_ORACLE
             ) or (
-                field_obj[0] == "storage_api_insecure_channel"
+                field_obj[0] in _BIGQUERY_FLAG_FIELDS
                 and database == consts.SOURCE_TYPE_BIGQUERY
             ):  # flag
                 db_parser.add_argument(arg_field, help=help_txt, action="store_true")
             else:
                 db_parser.add_argument(arg_field, help=help_txt)
+
+
+_BIGQUERY_FLAG_FIELDS = (
+    consts.STORAGE_API_INSECURE_CHANNEL,
+    consts.STORAGE_API_DISABLED,
+    consts.ANONYMOUS_CREDENTIALS,
+)
 
 
 def _configure_validate_parser(subparsers):

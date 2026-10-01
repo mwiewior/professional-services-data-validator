@@ -139,6 +139,14 @@ data-validation connections add
                                                         for a local BigQuery emulator that serves
                                                         its Storage API port without TLS. Has no
                                                         effect without --storage-api-endpoint.
+    [--storage-api-disabled]                            (Optional) Never use the BigQuery Storage
+                                                        API: read every query result through the
+                                                        REST API instead - for a local BigQuery
+                                                        emulator whose Storage API cannot serve
+                                                        query-result tables.
+    [--anonymous-credentials]                           (Optional) Connect without Google
+                                                        credentials - for a local BigQuery
+                                                        emulator reached through --api-endpoint.
 ```
 BigQuery is a [Client based API](https://docs.cloud.google.com/docs/quotas/quota-project#project-client-based). If the connection is being made by the user who has authenticated using gcloud CLI, the billing project is set by the user's gcloud configuration. Users can change the billing project by using `gcloud config set project <billing-project-id>`. If the connection is being made by a Service Account, the default billing project is the project where the Service Account resides. The option `--billing-project-id` can be used to override the default billing project.
 ### User/Service account needs following BigQuery permissions to run DVT

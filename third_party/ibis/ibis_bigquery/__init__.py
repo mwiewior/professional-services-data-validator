@@ -53,8 +53,12 @@ class Backend(BigQueryBackend):
         client: bq.Client = None,
         storage_client: "google.cloud.bigquery_storage_v1.BigQueryReadClient" = None,
         location: str = None,
+        storage_api_disabled: bool = False,
     ):
         """Copy of Ibis v5 BigQuery do_connect() customized for DVT, see original method for docs."""
+        # Read query results through the REST API only, never creating a Storage API client -
+        # a local BigQuery emulator's Storage API cannot serve anonymous query-result tables.
+        self.storage_api_disabled = storage_api_disabled
         client_project_id = client.project if client is not None else None
         default_project_id = None
 
@@ -124,7 +128,10 @@ class Backend(BigQueryBackend):
                     progress_bar_type=None,
                     # Include DVT specific storage client.
                     bqstorage_client=storage_client,
-                    create_bqstorage_client=bool(not self.storage_client),
+                    create_bqstorage_client=bool(
+                        not self.storage_client
+                        and not getattr(self, "storage_api_disabled", False)
+                    ),
                 )
 
         query = cursor.query

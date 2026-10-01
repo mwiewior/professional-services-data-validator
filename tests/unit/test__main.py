@@ -122,6 +122,8 @@ CONNECTION_ADD_ARGS = {
     consts.API_ENDPOINT: None,
     consts.STORAGE_API_ENDPOINT: None,
     consts.STORAGE_API_INSECURE_CHANNEL: False,
+    consts.STORAGE_API_DISABLED: False,
+    consts.ANONYMOUS_CREDENTIALS: False,
     consts.CLIENT_PROJECT_ID: None,
     consts.BILLING_PROJECT_ID: None,
 }

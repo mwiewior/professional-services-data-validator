@@ -156,6 +156,8 @@ PROJECT_ID = "project_id"
 API_ENDPOINT = "api_endpoint"
 STORAGE_API_ENDPOINT = "storage_api_endpoint"
 STORAGE_API_INSECURE_CHANNEL = "storage_api_insecure_channel"
+STORAGE_API_DISABLED = "storage_api_disabled"
+ANONYMOUS_CREDENTIALS = "anonymous_credentials"
 CLIENT_PROJECT_ID = "client_project_id"
 BILLING_PROJECT_ID = "billing_project_id"
 
