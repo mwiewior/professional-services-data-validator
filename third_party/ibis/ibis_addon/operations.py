@@ -11,105 +11,42 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""DVT's own operations and its per-engine compile rules, on ibis 12's sqlglot compilers.
 
-"""The Ibis Addons Operations are intended to help facilitate new expressions
-when required before they can be pushed upstream to Ibis.
-
-Raw SQL Filters:
-The ability to inject RawSQL into a query DNE in Ibis.  It must be built out
-and applied to each Ibis Data Source directly as each has
-extended its own registry.  Eventually this can potentially be pushed to
-Ibis as an override, though it would not apply for Pandas and other
-non-textual languages.
+DVT needs some operations ibis has no form of (a padded CHAR's length, a binary's byte length,
+TO_CHAR, a raw SQL filter) and needs others compiled so every engine's text of a value is the same
+(a cast to string, a hex hash, epoch seconds), because DVT compares the two sides' values as text
+and as hashes of text. ibis 12 compiles an operation `Op` with its compiler's `visit_Op`, so each
+rule below is such a method, added to (or wrapping) the compiler of the engine it is for.
 """
 
-import datetime
-import dateutil
 import string
 from typing import Union
 
-import ibis
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 import ibis.expr.rules as rlz
-import numpy as np
-import pandas as pd
-import sqlalchemy as sa
-from ibis.backends.base import BaseBackend
-from ibis.backends.base.sql.alchemy import BaseAlchemyBackend
-from ibis.backends.base.sql.alchemy.registry import _cast as sa_fixed_cast
-from ibis.backends.base.sql.alchemy.translator import AlchemyExprTranslator
-from ibis.backends.base.sql.compiler.translator import ExprTranslator
-from ibis.backends.base.sql.registry import fixed_arity
-import third_party.ibis.ibis_pandas
-
-# In Ibis 7.1.0, BigQueryType handles type conversion natively.
-from ibis.backends.bigquery.compiler import BigQueryExprTranslator
-from ibis.backends.bigquery.registry import bigquery_cast
-from ibis.backends.impala.compiler import ImpalaExprTranslator
-from ibis.backends.mssql.compiler import MsSqlExprTranslator
-from ibis.backends.mysql.compiler import MySQLExprTranslator
-from ibis.backends.pandas.dispatch import execute_node
-from ibis.backends.postgres.compiler import PostgreSQLExprTranslator
+import sqlglot as sg
+import sqlglot.expressions as sge
+from ibis.backends.sql.compilers import (
+    BigQueryCompiler,
+    DatabricksCompiler,
+    ImpalaCompiler,
+    OracleCompiler,
+    PySparkCompiler,
+)
+from ibis.backends.sql.compilers.base import SQLGlotCompiler
 from ibis.expr.types import (
     BinaryValue,
+    DateValue,
     NumericValue,
     StringValue,
-    DateValue,
-    TimeValue,
+    Table,
     TimestampValue,
+    TimeValue,
 )
 
-# Do not remove these lines, they trigger patching of Ibis code.
-# We patch Ibis native compilers/backends directly.
-import third_party.ibis.ibis_mysql  # noqa
-import third_party.ibis.ibis_postgres  # noqa
-
-from third_party.ibis.ibis_cloud_spanner.compiler import SpannerExprTranslator
-from third_party.ibis.ibis_redshift.compiler import RedShiftExprTranslator
-
-from third_party.ibis.ibis_mssql import registry as mssql_registry
-from third_party.ibis.ibis_bigquery import registry as bigquery_registry
-from third_party.ibis.ibis_impala import registry as impala_registry
-from third_party.ibis.ibis_postgres import registry as postgres_registry
-
-# DB2 requires ibm_db_dbi
-try:
-    from third_party.ibis.ibis_db2.compiler import Db2ExprTranslator
-    from third_party.ibis.ibis_db2_zos.compiler import Db2zOSExprTranslator
-except Exception:
-    Db2ExprTranslator = None
-    Db2zOSExprTranslator = None
-
-# Oracle requires oracledb
-try:
-    from third_party.ibis.ibis_oracle.compiler import OracleExprTranslator
-    from third_party.ibis.ibis_oracle import registry as oracle_registry
-except Exception:
-    OracleExprTranslator = None
-
-# TD requires teradatasql
-try:
-    from third_party.ibis.ibis_teradata.compiler import TeradataExprTranslator
-except Exception:
-    TeradataExprTranslator = None
-
-# Snowflake requires snowflake-connector-python and snowflake-sqlalchemy
-try:
-    from ibis.backends.snowflake import SnowflakeExprTranslator
-    from third_party.ibis.ibis_snowflake import registry as snowflake_registry
-except Exception:
-    SnowflakeExprTranslator = None
-
-# Sybase requires sqlalchemy_sybase package.
-try:
-    from third_party.ibis.ibis_sybase.compiler import SybaseExprTranslator
-except Exception:
-    SybaseExprTranslator = None
-
-# Cast of datetime64 NaT to int64 and then in seconds results in the value below.
-# We need to use this value in the datetime.date simulation of the datetime64 behaviour.
-NAT_INT64_MIN_IN_SECONDS = np.iinfo(np.int64).min // 1_000_000_000
+# --- DVT's own operations ---------------------------------------------------------------------
 
 
 class BinaryLength(ops.Value):
@@ -131,8 +68,13 @@ class ToChar(ops.Value):
     shape = rlz.shape_like("arg")
 
 
-class RawSQL(ops.Comparison):
-    pass
+class RawSQL(ops.Value):
+    """A boolean SQL text taken as it is, for a user's filter (`--filters`)."""
+
+    arg: ops.Value
+    sql: str
+    dtype = dt.boolean
+    shape = rlz.shape_like("arg")
 
 
 def compile_binary_length(binary_value):
@@ -147,326 +89,231 @@ def compile_to_char(numeric_value, fmt):
     return ToChar(numeric_value, fmt=fmt).to_expr()
 
 
-@bigquery_cast.register(str, dt.Binary, dt.String)
-def bigquery_cast_from_binary_generate(compiled_arg, from_, to):
-    """Cast of binary to string should be hex conversion."""
-    return f"TO_HEX({compiled_arg})"
+def compile_raw_sql(table: Table, sql: str):
+    return RawSQL(table[table.columns[0]], sql).to_expr()
 
-
-@bigquery_cast.register(str, dt.String, dt.Binary)
-def bigquery_cast_to_binary_generate(compiled_arg, from_, to):
-    """Cast of binary to string should be hex conversion."""
-    return f"FROM_HEX({compiled_arg})"
-
-
-def format_hashbytes_teradata(translator, op):
-    arg = translator.translate(op.arg)
-    if op.how == "sha256":
-        return f"rtrim(hash_sha256(TransUnicodeToUTF8({arg})))"
-    elif op.how == "sha512":
-        return f"rtrim(hash_sha512({arg}))"
-    elif op.how == "md5":
-        return f"rtrim(hash_md5({arg}))"
-    else:
-        raise ValueError(f"unexpected value for 'how': {op.how}")
-
-
-def strftime_mysql(translator, op):
-    arg = op.arg
-    format_string = op.format_str
-    arg_formatted = translator.translate(arg)
-    arg_type = arg.dtype
-    fmt_string = translator.translate(format_string)
-    if isinstance(arg_type, dt.Timestamp):
-        fmt_string = "%Y-%m-%d %H:%i:%S"
-    return sa.func.date_format(arg_formatted, fmt_string)
-
-
-def format_hashbytes_alchemy(translator, op):
-    arg = translator.translate(op.arg)
-    if op.how == "sha256":
-        return f"sha2({arg}, 256)"
-    elif op.how == "md5":
-        return f"md5({arg})"
-    else:
-        raise ValueError(f"unexpected value for 'how': {op.how}")
-
-
-def format_hashbytes_base(translator, op):
-    arg = translator.translate(op.arg)
-    return f"sha2({arg}, 256)"
-
-
-def compile_raw_sql(table, sql):
-    op = RawSQL(table[table.columns[0]].cast(dt.string), ibis.literal(sql))
-    return op.to_expr()
-
-
-def format_raw_sql(translator, op):
-    rand_col, raw_sql = op.args
-    return raw_sql.args[0]
-
-
-def sa_format_raw_sql(translator, op):
-    rand_col, raw_sql = op.args
-    return sa.literal_column(f"({raw_sql.args[0]})")
-
-
-def sa_format_hashbytes_mysql(translator, op):
-    arg = translator.translate(op.arg)
-    hash_func = sa.func.sha2(arg, sa.sql.literal_column("'256'"))
-    return hash_func
-
-
-def sa_format_hashbytes_redshift(translator, op):
-    arg = translator.translate(op.arg)
-    return sa.sql.literal_column(f"sha2({arg}, 256)")
-
-
-def sa_format_to_char(translator, op):
-    arg = translator.translate(op.arg)
-    fmt = translator.translate(op.fmt)
-    return sa.func.to_char(arg, fmt)
-
-
-def sa_format_binary_length(translator, op):
-    arg = translator.translate(op.arg)
-    return sa.func.length(arg)
-
-
-def sa_cast_mysql(t, op):
-    # Add cast from numeric to string
-    arg = op.arg
-    typ = op.to
-    arg_dtype = arg.dtype
-
-    sa_arg = t.translate(arg)
-    # Specialize going from numeric(p,s>0) to string
-    if (
-        arg_dtype.is_decimal()
-        and arg_dtype.scale
-        and arg_dtype.scale > 0
-        and typ.is_string()
-    ):
-        # When casting a number to string MySQL includes the full scale, e.g.:
-        #   SELECT CAST(CAST(100 AS DECIMAL(5,2)) AS CHAR);
-        #     100.00
-        # This doesn't match most engines which would return "100".
-        # We've used a workaround from StackOverflow:
-        #   https://stackoverflow.com/a/20111398
-        return sa_fixed_cast(t, op) + sa.literal(0)
-    elif arg_dtype.is_binary() and typ.is_string():
-        # Binary to string cast is a "to hex" conversion for DVT.
-        return sa.func.lower(sa.func.hex(sa_arg))
-    elif arg_dtype.is_string() and typ.is_binary():
-        # Binary from string cast is a "from hex" conversion for DVT.
-        return sa.func.unhex(sa_arg)
-
-    # Follow the original Ibis code path.
-    return sa_fixed_cast(t, op)
-
-
-def sa_format_random(t, op):
-    return sa.func.RANDOM()
-
-
-# Native BigQueryType/BigQuerySchema mapping is used in Ibis 7.1.0
-
-
-def string_to_epoch(ts: str) -> int:
-    """Function to convert string timestamp to epoch seconds"""
-    try:
-        if pd.isna(ts):
-            # Casting datetime64 to int64 uses the minimum possible int64 when it
-            # encounters NaT. Simulating the same here for when auto cast fails.
-            return NAT_INT64_MIN_IN_SECONDS
-        parsed_ts = dateutil.parser.isoparse(ts)
-        if parsed_ts.tzinfo is None:
-            parsed_ts = parsed_ts.replace(tzinfo=datetime.timezone.utc)
-        parsed_ts = parsed_ts.astimezone(datetime.timezone.utc)
-        return (
-            parsed_ts - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
-        ).total_seconds()
-    except (ValueError, OSError):
-        # Support DATE '0001-01-01' which throws error when converted to UTC
-        # Catching OSError above because all dates prior to 1970 fail in astimezone on Windows.
-        parsed_ts = dateutil.parser.isoparse(ts)
-        return (parsed_ts - datetime.datetime(1970, 1, 1)).total_seconds()
-
-
-@execute_node.register(ops.ExtractEpochSeconds, (datetime.datetime, pd.Series))
-def execute_epoch_seconds_new(op, data, **kwargs):
-    convert = data.astype
-    try:
-        series = convert(np.int64)
-        # We need int64 below because NaT overflows int32.
-        return (series // 1_000_000_000).astype(np.int64)
-    except (TypeError, ValueError):
-        # Catch 'TypeError' or 'ValueError' for large timestamps beyond max datetime64[ns] as per Issue #1053
-        # Cast to string instead to work around datetime64[ns] limitation
-        series = data.astype("string")
-        epoch_series = series.map(string_to_epoch)
-        return epoch_series
-
-
-def _dvt_list_tables(self, like=None, database=None) -> list:
-    """Alternative to BaseAlchemyBackend.list_tables that does not include views in the result."""
-    tables = self.inspector.get_table_names(schema=database)
-    return self._filter_with_like(tables, like)
-
-
-def _sa_whitespace_rstrip(t, op):
-    sa_arg = t.translate(op.arg)
-    return sa.func.rtrim(sa_arg, string.whitespace)
-
-
-execute_epoch_seconds = execute_epoch_seconds_new
 
 BinaryValue.byte_length = compile_binary_length
-
 StringValue.padded_char_length = compile_padded_char_length
-
 NumericValue.to_char = compile_to_char
 DateValue.to_char = compile_to_char
 TimeValue.to_char = compile_to_char
 TimestampValue.to_char = compile_to_char
 
-# This is an additional DVT only method. We tag this onto BaseAlchemyBackend
-# so we can piggy back Ibis code rather than writing metadata queries for all engines.
-BaseAlchemyBackend.dvt_list_tables = _dvt_list_tables
 
-# Default to False for native SQL tuple/struct IN expression support.
-# Backends supporting native tuple IN (e.g., PostgreSQL, MySQL, Snowflake, Oracle, Db2)
-# override this method to return True in their respective packages.
-BaseBackend.dvt_tuple_in_supported = lambda self: False
-
-BigQueryExprTranslator._registry[ops.HashBytes] = bigquery_registry.format_hashbytes
-BigQueryExprTranslator._registry[RawSQL] = format_raw_sql
-BigQueryExprTranslator._registry[ops.Strftime] = bigquery_registry.strftime
-BigQueryExprTranslator._registry[BinaryLength] = bigquery_registry.format_binary_length
-BigQueryExprTranslator._registry[ops.ExtractEpochSeconds] = (
-    bigquery_registry.extract_epoch_seconds
-)
-
-AlchemyExprTranslator._registry[RawSQL] = format_raw_sql
-AlchemyExprTranslator._registry[ops.HashBytes] = format_hashbytes_alchemy
-AlchemyExprTranslator._registry[PaddedCharLength] = AlchemyExprTranslator._registry[
-    ops.StringLength
-]
-ExprTranslator._registry[RawSQL] = format_raw_sql
-ExprTranslator._registry[ops.HashBytes] = format_hashbytes_base
-# Base length of padded string is the same as for a standard string.
-ExprTranslator._registry[PaddedCharLength] = ExprTranslator._registry[ops.StringLength]
-
-ImpalaExprTranslator._registry[ops.Cast] = impala_registry.sa_cast
-ImpalaExprTranslator._registry[RawSQL] = format_raw_sql
-ImpalaExprTranslator._registry[ops.HashBytes] = impala_registry.sa_format_hashbytes
-ImpalaExprTranslator._registry[ops.RandomScalar] = fixed_arity("RAND", 0)
-ImpalaExprTranslator._registry[ops.Strftime] = impala_registry.sa_strftime
-ImpalaExprTranslator._registry[BinaryLength] = fixed_arity("length", 1)
-
-if OracleExprTranslator:
-    OracleExprTranslator._registry[RawSQL] = sa_format_raw_sql
-    OracleExprTranslator._registry[ops.HashBytes] = oracle_registry.format_hashbytes
-    OracleExprTranslator._registry[ToChar] = sa_format_to_char
-    OracleExprTranslator._registry[BinaryLength] = oracle_registry.format_binary_length
-    OracleExprTranslator._registry[ops.RStrip] = _sa_whitespace_rstrip
-    OracleExprTranslator._registry[PaddedCharLength] = OracleExprTranslator._registry[
-        ops.StringLength
-    ]
-
-PostgreSQLExprTranslator._registry[ops.HashBytes] = (
-    postgres_registry.sa_format_hashbytes
-)
-PostgreSQLExprTranslator._registry[RawSQL] = sa_format_raw_sql
-PostgreSQLExprTranslator._registry[ToChar] = sa_format_to_char
-PostgreSQLExprTranslator._registry[ops.Cast] = postgres_registry.sa_cast_postgres
-PostgreSQLExprTranslator._registry[BinaryLength] = sa_format_binary_length
-PostgreSQLExprTranslator._registry[ops.ExtractEpochSeconds] = (
-    postgres_registry.sa_epoch_seconds
-)
-PostgreSQLExprTranslator._registry[PaddedCharLength] = (
-    postgres_registry.sa_format_postgres_padded_char_length
-)
+def _method(compiler, name, fn):
+    setattr(compiler, f"visit_{name}", fn)
 
 
-MsSqlExprTranslator._registry[ops.HashBytes] = mssql_registry.sa_format_hashbytes
-MsSqlExprTranslator._registry[RawSQL] = sa_format_raw_sql
-MsSqlExprTranslator._registry[ops.StringJoin] = mssql_registry.sa_string_join
-MsSqlExprTranslator._registry[ops.RandomScalar] = mssql_registry.sa_format_new_id
-MsSqlExprTranslator._registry[ops.StringLength] = mssql_registry.sa_format_string_length
-MsSqlExprTranslator._registry[ops.Strftime] = mssql_registry.strftime
-MsSqlExprTranslator._registry[ops.Cast] = mssql_registry.sa_cast_mssql
-MsSqlExprTranslator._registry[BinaryLength] = mssql_registry.sa_format_binary_length
-MsSqlExprTranslator._registry[ops.TableColumn] = mssql_registry.sa_table_column
-MsSqlExprTranslator._registry[ops.ExtractEpochSeconds] = mssql_registry.sa_epoch_seconds
-MsSqlExprTranslator._registry[ops.RStrip] = mssql_registry.sa_whitespace_rstrip
-MsSqlExprTranslator._registry[ops.Mean] = mssql_registry.sa_format_mean
-MsSqlExprTranslator._registry[ops.Sum] = mssql_registry.sa_format_sum
-MsSqlExprTranslator._registry[PaddedCharLength] = MsSqlExprTranslator._registry[
-    ops.StringLength
-]
+def _wrap(compiler, name, fn):
+    """`fn(self, op, original, **kw)`: the engine's rule, falling back to ibis's own `original`."""
+    original = getattr(compiler, f"visit_{name}")
 
-MySQLExprTranslator._registry[ops.Cast] = sa_cast_mysql
-MySQLExprTranslator._registry[RawSQL] = sa_format_raw_sql
-MySQLExprTranslator._registry[ops.HashBytes] = sa_format_hashbytes_mysql
-MySQLExprTranslator._registry[ops.Strftime] = strftime_mysql
-MySQLExprTranslator._registry[BinaryLength] = sa_format_binary_length
+    def visit(self, op, **kw):
+        return fn(self, op, lambda: original(self, op, **kw), **kw)
 
-RedShiftExprTranslator._registry[ops.HashBytes] = sa_format_hashbytes_redshift
-RedShiftExprTranslator._registry[RawSQL] = sa_format_raw_sql
-RedShiftExprTranslator._registry[BinaryLength] = sa_format_binary_length
-RedShiftExprTranslator._registry[PaddedCharLength] = RedShiftExprTranslator._registry[
-    ops.StringLength
-]
+    setattr(compiler, f"visit_{name}", visit)
 
-if Db2ExprTranslator:
-    Db2ExprTranslator._registry[RawSQL] = sa_format_raw_sql
-    Db2ExprTranslator._registry[BinaryLength] = sa_format_binary_length
-    Db2ExprTranslator._registry[ops.RStrip] = _sa_whitespace_rstrip
-    Db2ExprTranslator._registry[PaddedCharLength] = Db2ExprTranslator._registry[
-        ops.StringLength
-    ]
 
-if Db2zOSExprTranslator:
-    Db2zOSExprTranslator._registry[RawSQL] = sa_format_raw_sql
-    Db2zOSExprTranslator._registry[BinaryLength] = sa_format_binary_length
-    Db2zOSExprTranslator._registry[PaddedCharLength] = Db2zOSExprTranslator._registry[
-        ops.StringLength
-    ]
+# --- every engine -----------------------------------------------------------------------------
 
-SpannerExprTranslator._registry[RawSQL] = format_raw_sql
-SpannerExprTranslator._registry[ops.HashBytes] = bigquery_registry.format_hashbytes
-SpannerExprTranslator._registry[BinaryLength] = fixed_arity("length", 1)
 
-if TeradataExprTranslator:
-    TeradataExprTranslator._registry[RawSQL] = format_raw_sql
-    TeradataExprTranslator._registry[ops.HashBytes] = format_hashbytes_teradata
-    TeradataExprTranslator._registry[BinaryLength] = fixed_arity("length", 1)
-    TeradataExprTranslator._registry[PaddedCharLength] = (
-        TeradataExprTranslator._registry[ops.StringLength]
-    )
+def _visit_raw_sql(self, op, *, arg, sql):
+    return sge.Paren(this=sg.parse_one(sql, dialect=self.dialect))
 
-if SnowflakeExprTranslator:
-    SnowflakeExprTranslator._registry[ops.Cast] = snowflake_registry.cast_snowflake
-    SnowflakeExprTranslator._registry[ops.HashBytes] = (
-        snowflake_registry.format_hashbytes_snowflake
-    )
-    SnowflakeExprTranslator._registry[RawSQL] = sa_format_raw_sql
-    SnowflakeExprTranslator._registry[ops.ExtractEpochSeconds] = (
-        snowflake_registry.epoch_time_snowflake
-    )
-    SnowflakeExprTranslator._registry[ops.RandomScalar] = sa_format_random
-    SnowflakeExprTranslator._registry[BinaryLength] = sa_format_binary_length
-    SnowflakeExprTranslator._registry[ops.RStrip] = _sa_whitespace_rstrip
 
-if SybaseExprTranslator:
-    SybaseExprTranslator._registry[BinaryLength] = (
-        mssql_registry.sa_format_binary_length
-    )
-    SybaseExprTranslator._registry[RawSQL] = sa_format_raw_sql
-    SybaseExprTranslator._registry[PaddedCharLength] = (
-        mssql_registry.sa_format_string_length
-    )
-    SybaseExprTranslator._registry[ops.Mean] = mssql_registry.sa_format_mean
-    SybaseExprTranslator._registry[ops.Sum] = mssql_registry.sa_format_sum
+def _visit_binary_length(self, op, *, arg):
+    return self.f.length(arg)
+
+
+def _visit_padded_char_length(self, op, *, arg):
+    return self.visit_StringLength(op, arg=arg)
+
+
+def _visit_to_char(self, op, *, arg, fmt):
+    return self.f.to_char(arg, fmt)
+
+
+_method(SQLGlotCompiler, "RawSQL", _visit_raw_sql)
+_method(SQLGlotCompiler, "BinaryLength", _visit_binary_length)
+_method(SQLGlotCompiler, "PaddedCharLength", _visit_padded_char_length)
+_method(SQLGlotCompiler, "ToChar", _visit_to_char)
+
+# --- Oracle -----------------------------------------------------------------------------------
+
+
+def _oracle_cast(self, op, original, *, arg, to):
+    from_ = op.arg.dtype
+    if from_.is_decimal() and to.is_string() and (from_.scale is None or from_.scale > 0):
+        # Oracle writes a fraction without its leading zero (0.5 is ".5"); every other engine
+        # writes it, so add it back
+        return self.if_(
+            sg.and_(arg > 0, arg < 1),
+            self.f.concat(sge.convert("0"), self.f.to_char(arg)),
+            self.if_(
+                sg.and_(arg > -1, arg < 0),
+                self.f.concat(sge.convert("-0"), self.f.to_char(self.f.abs(arg))),
+                self.f.to_char(arg),
+            ),
+        )
+    if from_.is_binary() and to.is_string():
+        return self.f.lower(self.f.rawtohex(arg))  # DVT reads a binary as its hex text
+    if from_.is_string() and to.is_binary():
+        return self.f.hextoraw(arg)
+    if from_.is_floating() and to.is_string():
+        return self.f.to_char(arg, "TM9")  # never scientific notation
+    if from_.is_interval() and to.is_string():
+        return self.f.to_char(arg)
+    if from_.is_string() and to.is_boolean():
+        return self.if_(
+            arg.isin(sge.convert("0"), sge.convert("N")),
+            sge.convert(0),
+            self.if_(arg.isin(sge.convert("1"), sge.convert("Y")), sge.convert(1), NULL),
+        )
+    if from_.is_boolean() and to.is_string():
+        return self.f.lower(self.f.to_char(arg))
+    if (from_.is_timestamp() or from_.is_date()) and to.is_date():
+        # a DATE everywhere else has no time of day
+        return self.cast(self.f.trunc(arg), dt.date)
+    return original()
+
+
+def _oracle_hex_digest(self, op, *, arg, how):
+    if how not in ("md5", "sha1", "sha256", "sha512"):
+        raise NotImplementedError(f"No available hashing function for {how}")
+    # the text's UTF-8 bytes, as every other engine hashes; STANDARD_HASH returns RAW, whose
+    # LOWER is its lower-case hex
+    return self.f.lower(
+        self.f.standard_hash(self.f.convert(arg, sge.convert("UTF8")), sge.convert(how.upper())))
+
+
+def _oracle_binary_length(self, op, *, arg):
+    return sge.Anonymous(this="DBMS_LOB.GETLENGTH", expressions=[arg])
+
+
+def _oracle_epoch_seconds(self, op, *, arg):
+    epoch = self.f.to_date(sge.convert("1970-01-01"), sge.convert("YYYY-MM-DD"))
+    days = sge.Paren(this=sge.Sub(this=self.cast(arg, dt.date), expression=epoch))
+    return self.cast(sge.Mul(this=days, expression=sge.convert(86400)), dt.Decimal(38, 0))
+
+
+def _whitespace(self):
+    """Every whitespace character, as Python's str.rstrip() strips: a space and CHR()s, since
+    not every engine reads escapes in a literal."""
+    chars = sge.convert(" ")
+    for c in string.whitespace.replace(" ", ""):
+        chars = sge.DPipe(this=chars, expression=self.f.chr(ord(c)), safe=True)
+    return chars
+
+
+def _oracle_whitespace_rstrip(self, op, *, arg):
+    return self.f.rtrim(arg, _whitespace(self))
+
+
+def _spark_whitespace_rstrip(self, op, *, arg):
+    # Spark's RTRIM takes no character set, its TRIM(TRAILING ...) does
+    return sge.Trim(this=arg, expression=_whitespace(self), position="TRAILING")
+
+
+NULL = sge.Null()
+_wrap(OracleCompiler, "Cast", _oracle_cast)
+_method(OracleCompiler, "HexDigest", _oracle_hex_digest)
+_method(OracleCompiler, "BinaryLength", _oracle_binary_length)
+_method(OracleCompiler, "RStrip", _oracle_whitespace_rstrip)
+_method(OracleCompiler, "ExtractEpochSeconds", _oracle_epoch_seconds)
+
+# --- BigQuery ---------------------------------------------------------------------------------
+
+
+def _bigquery_cast(self, op, original, *, arg, to):
+    from_ = op.arg.dtype
+    if from_.is_binary() and to.is_string():
+        return self.f.to_hex(arg)
+    if from_.is_string() and to.is_binary():
+        return self.f.from_hex(arg)
+    return original()
+
+
+def _bigquery_hex_digest(self, op, *, arg, how):
+    if how != "sha256":
+        raise NotImplementedError(f"No available hashing function for {how}")
+    return self.f.to_hex(self.f.sha256(arg))
+
+
+def _bigquery_strftime(self, op, *, arg, format_str):
+    dtype = op.arg.dtype
+    fmt = op.format_str.value
+    # GoogleSQL writes a year before 1000 CE with fewer digits unless %E4Y (DVT issue 1181)
+    if fmt.startswith("%Y"):
+        fmt = fmt.replace("%Y", "%E4Y", 1)
+    if dtype.is_date():
+        return self.f.format_date(fmt, arg)
+    if dtype.is_time():
+        return self.f.format_time(fmt, arg)
+    if dtype.timezone is None:
+        return self.f.format_datetime(fmt, self.f.datetime(arg))
+    return self.f.format_timestamp(fmt, self.f.timestamp(arg), dtype.timezone)
+
+
+def _bigquery_epoch_seconds(self, op, *, arg):
+    dtype = op.arg.dtype
+    if dtype.is_date() or (dtype.is_timestamp() and dtype.timezone is None):
+        return self.f.unix_seconds(self.cast(arg, dt.Timestamp(timezone="UTC")))
+    return self.f.unix_seconds(arg)
+
+
+_wrap(BigQueryCompiler, "Cast", _bigquery_cast)
+_method(BigQueryCompiler, "HexDigest", _bigquery_hex_digest)
+_method(BigQueryCompiler, "Strftime", _bigquery_strftime)
+_method(BigQueryCompiler, "ExtractEpochSeconds", _bigquery_epoch_seconds)
+
+# --- Spark: the emulator's Thrift server (Impala), PySpark and Databricks ---------------------
+
+
+def _spark_decimal_text(self, arg):
+    # Spark writes a decimal's text with its scale (14679.00); Oracle and BigQuery without
+    # trailing zeros (14679)
+    return self.f.regexp_replace(
+        self.f.regexp_replace(self.cast(arg, dt.string), "([.][0-9]*?)0+$", "$1"), "[.]$", "")
+
+
+def _spark_cast(self, op, original, *, arg, to):
+    from_ = op.arg.dtype
+    if from_.is_binary() and to.is_string():
+        return self.f.lower(self.f.hex(arg))
+    if from_.is_string() and to.is_binary():
+        return self.f.unhex(arg)
+    if from_.is_decimal() and to.is_string():
+        return _spark_decimal_text(self, arg)
+    if from_.is_boolean() and to.is_string():
+        return self.f.lower(self.cast(arg, dt.string))
+    return original()
+
+
+def _spark_hex_digest(self, op, *, arg, how):
+    if how == "md5":
+        return self.f.md5(arg)
+    if how == "sha1":
+        return self.f.sha1(arg)
+    if how in ("sha256", "sha512"):
+        return self.f.sha2(arg, int(how[-3:]))
+    raise NotImplementedError(f"No available hashing function for {how}")
+
+
+def _spark_strftime(self, op, *, arg, format_str):
+    # date_format reads a date or timestamp as it is; Spark's ANSI mode refuses the
+    # unix_timestamp() round trip of a timestamp's text with fractional seconds
+    from sqlglot.dialects.spark import Spark
+    from sqlglot.time import format_time
+
+    return self.f.date_format(arg, format_time(op.format_str.value, Spark.INVERSE_TIME_MAPPING,
+                                               Spark.INVERSE_TIME_TRIE))
+
+
+# Databricks too, explicitly: ibis makes each compiler class its own methods for simple operations
+for _compiler in (ImpalaCompiler, PySparkCompiler, DatabricksCompiler):
+    _wrap(_compiler, "Cast", _spark_cast)
+    _method(_compiler, "HexDigest", _spark_hex_digest)
+    _method(_compiler, "Strftime", _spark_strftime)
+    _method(_compiler, "RandomScalar", lambda self, op, **kw: self.f.rand())
+    _method(_compiler, "RStrip", _spark_whitespace_rstrip)

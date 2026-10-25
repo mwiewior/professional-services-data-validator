@@ -33,8 +33,9 @@ dependencies = [
     "google-cloud-secret-manager>=2.20.2",
     "google-cloud-spanner>=3.49.1",
     "google-cloud-storage>=2.18.2",
-    "ibis-framework==7.1.0",
-    "impyla>=0.19.0",
+    # ibis 12 (the axis fork): every engine DVT compares is ibis's own backend; these are always
+    # installed (DuckDB is where the two sides' results are compared), the rest are extras
+    "ibis-framework[oracle,bigquery,impala,databricks,postgres,duckdb]==12.0.0",
     "jellyfish>=1.1.0",
     "pandas",
     "parsy>=2.1",
@@ -47,9 +48,13 @@ dependencies = [
     "tabulate>=0.9.0",
 ]
 
+_IBIS_EXTRAS = ("mssql", "mysql", "snowflake", "trino", "clickhouse", "athena", "exasol", "druid",
+                "flink", "materialize", "risingwave", "singlestoredb", "sqlite", "datafusion",
+                "polars", "pyspark")
 extras_require = {
+    **{e: f"ibis-framework[{e}]==12.0.0" for e in _IBIS_EXTRAS},
+    "all": [f"ibis-framework[{e}]==12.0.0" for e in _IBIS_EXTRAS],
     "apache-airflow": "1.10.11",
-    "pyspark": "3.0.0",
     "develop": [
         "black==26.5.1",
         "flake8",
