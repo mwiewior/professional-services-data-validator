@@ -104,12 +104,15 @@ def list_to_sublists(id_list: list, max_size: int) -> list:
 
 
 def dates_as_dates(df, expr):
-    """`df` (the result of `expr`) with each DATE column as Python dates: ibis 12 returns one as
-    pandas datetime64, ibis 7 (whose results DVT's comparison and its report text are built on)
-    as dates, so a date reads "2026-10-25", never "2026-10-25 00:00:00"."""
+    """`df` (the result of `expr`) with each DATE column of midnights as Python dates: ibis 12
+    returns one as pandas datetime64, which ibis 7 (whose results DVT's comparison and its report
+    text are built on) printed as dates, "2026-10-25", only when every value was midnight. An
+    Oracle DATE has a time, and a column holding one keeps it."""
     import pandas
 
     for name, dtype in expr.schema().items():
         if dtype.is_date() and name in df and pandas.api.types.is_datetime64_any_dtype(df[name]):
-            df[name] = df[name].dt.date
+            values = df[name].dropna()
+            if (values == values.dt.normalize()).all():
+                df[name] = df[name].dt.date
     return df

@@ -252,3 +252,25 @@ def test_list_to_sublists(
 ):
     result = module_under_test.list_to_sublists(input_list, max_length)
     assert result == expected_result
+
+
+def test_dates_as_dates_keeps_an_oracle_dates_time():
+    """An Oracle DATE has a time: ibis 7 printed a DATE column as dates only when every value was
+    midnight (pandas' own text), so min/max of a DATE with a time compare as timestamps."""
+    import ibis
+    import pandas
+
+    df = pandas.DataFrame(
+        {
+            "d": pandas.to_datetime(["2026-10-01 12:34:56", None]),
+            "dd": pandas.to_datetime(["2026-10-01", None]),
+        }
+    )
+    expr = ibis.table({"d": "date", "dd": "date"}, name="t")
+
+    from data_validation import util
+
+    out = util.dates_as_dates(df, expr)
+
+    assert str(out["d"][0]) == "2026-10-01 12:34:56"
+    assert str(out["dd"][0]) == "2026-10-01"
