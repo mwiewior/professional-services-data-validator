@@ -462,8 +462,8 @@ class DataValidation(object):
                     target_query,
                 )
             )
-            source_df = futures[0].result()
-            target_df = futures[1].result()
+            source_df = util.dates_as_dates(futures[0].result(), source_query)
+            target_df = util.dates_as_dates(futures[1].result(), target_query)
 
         try:
             result_df = util.timed_call(

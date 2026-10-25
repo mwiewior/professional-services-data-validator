@@ -29,7 +29,7 @@ import ibis
 import ibis.expr.datatypes as dt
 import pandas
 
-from data_validation import clients, consts
+from data_validation import clients, consts, util
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -198,17 +198,17 @@ def _generate_report_slice(
     differences_pivot = _calculate_differences(
         source, target, join_on_fields, run_metadata.validations, is_value_comparison
     )
-    differences_df = client.execute(differences_pivot)
+    differences_df = util.dates_as_dates(client.execute(differences_pivot), differences_pivot)
 
     source_pivot = _pivot_result(
         source, join_on_fields, run_metadata.validations, consts.RESULT_TYPE_SOURCE
     )
-    source_pivot_df = client.execute(source_pivot)
+    source_pivot_df = util.dates_as_dates(client.execute(source_pivot), source_pivot)
 
     target_pivot = _pivot_result(
         target, join_on_fields, run_metadata.validations, consts.RESULT_TYPE_TARGET
     )
-    target_pivot_df = client.execute(target_pivot)
+    target_pivot_df = util.dates_as_dates(client.execute(target_pivot), target_pivot)
 
     joined = _join_pivots(
         client.create_table(consts.RESULT_TYPE_SOURCE, _typed(source_pivot_df), overwrite=True),
@@ -225,7 +225,7 @@ def _generate_report_slice(
         logging.debug("-- ** Combiner Query ** --")
         logging.debug(documented.compile())
 
-    result_df = client.execute(documented)
+    result_df = util.dates_as_dates(client.execute(documented), documented)
     result_df["validation_status"] = result_df["validation_status"].fillna(
         consts.VALIDATION_STATUS_FAIL
     )

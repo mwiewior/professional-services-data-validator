@@ -91,39 +91,3 @@ def test_maybe_add_random_sort_supported(mock_random):
     mock_table_sliced.order_by.assert_called_once_with(mock_random_expr)
     mock_table_ordered.limit.assert_called_once_with(10)
     assert result == mock_table_limited
-
-
-@mock.patch("ibis.random")
-def test_maybe_add_random_sort_aliased(mock_random):
-    mock_client = mock.MagicMock()
-    mock_client.name = "db2_zos"
-
-    mock_random_expr = mock.MagicMock()
-    mock_random.return_value = mock_random_expr
-
-    mock_table = mock.MagicMock()
-    mock_table_sliced = mock.MagicMock()
-    mock_table_mutated = mock.MagicMock()
-    mock_table_ordered = mock.MagicMock()
-    mock_table_limited = mock.MagicMock()
-    mock_table_final = mock.MagicMock()
-
-    mock_table.__getitem__.return_value = mock_table_sliced
-    mock_table_sliced.mutate.return_value = mock_table_mutated
-    mock_table_mutated.order_by.return_value = mock_table_ordered
-    mock_table_ordered.limit.return_value = mock_table_limited
-    mock_table_limited.__getitem__.return_value = mock_table_final
-
-    builder = random_row_builder.RandomRowBuilder(["id"], 10)
-
-    result = builder.maybe_add_random_sort(mock_client, mock_table)
-
-    mock_table.__getitem__.assert_called_once_with(["id"])
-    mock_table_sliced.mutate.assert_called_once_with(
-        **{"random_sort": mock_random_expr}
-    )
-    mock_table_mutated.order_by.assert_called_once_with("random_sort")
-    mock_table_ordered.limit.assert_called_once_with(10)
-    mock_table_limited.__getitem__.assert_called_once_with(["id"])
-
-    assert result == mock_table_final

@@ -101,3 +101,15 @@ def dvt_temp_object_name(prefix: str = "dvt_temp") -> str:
 def list_to_sublists(id_list: list, max_size: int) -> list:
     """Return a list of items as a list of lists based on a max list length of max_size."""
     return [id_list[_ : _ + max_size] for _ in range(0, len(id_list), max_size)]
+
+
+def dates_as_dates(df, expr):
+    """`df` (the result of `expr`) with each DATE column as Python dates: ibis 12 returns one as
+    pandas datetime64, ibis 7 (whose results DVT's comparison and its report text are built on)
+    as dates, so a date reads "2026-10-25", never "2026-10-25 00:00:00"."""
+    import pandas
+
+    for name, dtype in expr.schema().items():
+        if dtype.is_date() and name in df and pandas.api.types.is_datetime64_any_dtype(df[name]):
+            df[name] = df[name].dt.date
+    return df
