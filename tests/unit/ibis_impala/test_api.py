@@ -38,3 +38,21 @@ def test_a_cursor_given_a_user_keeps_it():
         backend = impala_connect(host="spark", user="axis")
         backend.con.cursor(user="other")
     assert con.cursor.call_args.kwargs["user"] == "other"
+
+
+def test_connecting_leaves_no_cursor_open():
+    """Every cursor of a connection shares its Thrift transport: one left open is closed whenever
+    Python collects it, and its close RPC lands inside another cursor's, which then reads the
+    wrong reply ("Invalid method name: 'CloseImpalaOperation'" on a Spark Thrift server)."""
+    con = mock.MagicMock()
+    cursors = []
+
+    def cursor(**kwargs):
+        cursors.append(mock.MagicMock())
+        return cursors[-1]
+
+    con.cursor.side_effect = cursor
+    with mock.patch("impala.dbapi.connect", return_value=con):
+        impala_connect(host="spark", user="axis")
+
+    assert cursors and all(c.close.called for c in cursors)

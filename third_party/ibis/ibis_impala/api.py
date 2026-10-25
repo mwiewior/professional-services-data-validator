@@ -147,7 +147,9 @@ def impala_connect(
         http_path=http_path,
     )
     try:
-        backend.raw_sql("set hive.resultset.use.unique.column.names=false")
+        # closed here: every cursor shares the connection's Thrift transport, and one closed
+        # whenever Python collects it sends its close RPC inside another cursor's
+        backend.raw_sql("set hive.resultset.use.unique.column.names=false").close()
     except Exception:
         pass
     return backend
