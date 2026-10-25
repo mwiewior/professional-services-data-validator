@@ -70,18 +70,22 @@ def test_raw_column_metadata_no_args(module_under_test):
         _ = list(backend.raw_column_metadata(database=None, table=None, query=None))
 
 
-@pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
-@mock.patch("third_party.ibis.ibis_oracle.Backend.begin")
-def test_raw_column_metadata_core_types(mock_begin, module_under_test):
-    mock_begin().__enter__().exec_driver_sql().cursor.description = DVT_CORE_TYPES_CURS
+def _connected(module_under_test, description=None, rows=None):
+    """A backend whose Oracle connection is a mock: each cursor reports `description` and
+    fetches `rows`; the cursor is returned for asserting on what ran."""
+    cursor = mock.MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.description = description
+    cursor.fetchall.return_value = rows
     backend = module_under_test.Backend()
-    backend.list_tables = mock.Mock(return_value=["dvt_core_types"])
+    backend.con = mock.Mock(cursor=mock.Mock(return_value=cursor))
+    return backend, cursor
 
-    mock_dialect = mock.Mock()
-    mock_preparer = mock.Mock()
-    mock_preparer.quote.side_effect = lambda val: f'"{val}"'
-    mock_dialect.identifier_preparer = mock_preparer
-    backend.con = mock.Mock(dialect=mock_dialect)
+
+@pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
+def test_raw_column_metadata_core_types(module_under_test):
+    backend, cursor = _connected(module_under_test, DVT_CORE_TYPES_CURS)
+    backend.list_tables = mock.Mock(return_value=["dvt_core_types"])
 
     raw_types = list(
         backend.raw_column_metadata(
@@ -92,13 +96,14 @@ def test_raw_column_metadata_core_types(mock_begin, module_under_test):
     assert all(_[1] == "MOCKTYPE" for _ in raw_types)
     # Ensure we have 7 attributes.
     assert all(len(_) == 7 for _ in raw_types)
+    cursor.execute.assert_called_with(
+        'SELECT * FROM "pso_data_validator"."dvt_core_types" t0 WHERE ROWNUM <= 1'
+    )
 
 
 @pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
-@mock.patch("third_party.ibis.ibis_oracle.Backend.begin")
-def test_raw_column_metadata_qry(mock_begin, module_under_test):
-    mock_begin().__enter__().exec_driver_sql().cursor.description = DVT_CORE_TYPES_CURS
-    backend = module_under_test.Backend()
+def test_raw_column_metadata_qry(module_under_test):
+    backend, cursor = _connected(module_under_test, DVT_CORE_TYPES_CURS)
     raw_types = list(
         backend.raw_column_metadata(
             query="SELECT * FROM pso_data_validator.dvt_core_types"
@@ -108,56 +113,60 @@ def test_raw_column_metadata_qry(mock_begin, module_under_test):
     assert all(_[1] == "MOCKTYPE" for _ in raw_types)
     # Ensure we have 7 attributes.
     assert all(len(_) == 7 for _ in raw_types)
+    cursor.execute.assert_called_with(
+        "SELECT * FROM (SELECT * FROM pso_data_validator.dvt_core_types) t0 WHERE ROWNUM <= 1"
+    )
+
+
+SCHEMAS = [("SYS",), ("AUDSYS",), ("SYSTEM",), ("DBSNMP",), ("C##DS",), ("DVT_TEST",)]
 
 
 @pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
-@mock.patch("sqlalchemy.inspect")
-def test_list_databases(mock_inspect, module_under_test):
+def test_list_databases(module_under_test):
     """Test that list_databases excludes Oracle system schemas while preserving user and monitoring schemas."""
-    mock_inspect_result = mock.Mock()
-    mock_inspect_result.get_schema_names.return_value = [
-        "SYS",
-        "AUDSYS",
-        "SYSTEM",
-        "DBSNMP",
-        "C##DS",
-        "DVT_TEST",
-    ]
-    mock_inspect.return_value = mock_inspect_result
-
-    backend = module_under_test.Backend()
-    # Need to set self.con for sa.inspect to work
-    backend.con = mock.Mock()
+    backend, _cursor = _connected(module_under_test, rows=SCHEMAS)
 
     schemas = backend.list_databases()
 
     # SYS and AUDSYS should be filtered out.
     # SYSTEM, DBSNMP, C##DS, and DVT_TEST should remain.
     assert sorted(schemas) == sorted(["SYSTEM", "DBSNMP", "C##DS", "DVT_TEST"])
-    mock_inspect.assert_called_with(backend.con)
 
 
 @pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
-@mock.patch("sqlalchemy.inspect")
-def test_list_databases_with_like(mock_inspect, module_under_test):
+def test_list_databases_with_like(module_under_test):
     """Test that list_databases correctly filters schemas when a like pattern is provided."""
-    mock_inspect_result = mock.Mock()
-    mock_inspect_result.get_schema_names.return_value = [
-        "SYS",
-        "AUDSYS",
-        "SYSTEM",
-        "DBSNMP",
-        "C##DS",
-        "DVT_TEST",
-    ]
-    mock_inspect.return_value = mock_inspect_result
-
-    backend = module_under_test.Backend()
-    # Need to set self.con for sa.inspect to work
-    backend.con = mock.Mock()
+    backend, _cursor = _connected(module_under_test, rows=SCHEMAS)
 
     schemas = backend.list_databases(like=".*DVT.*")
 
     # Only DVT_TEST should match
     assert schemas == ["DVT_TEST"]
-    mock_inspect.assert_called_with(backend.con)
+
+
+@pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
+def test_get_schema_reads_oracle_types_as_dvt_does(module_under_test):
+    """A DATE is a date and a NUMBER a decimal of its own precision, as on ibis 7."""
+    import oracledb
+
+    description = [
+        ("ID", oracledb.DB_TYPE_NUMBER, 9, None, 8, 0, 0),
+        ("AMT", oracledb.DB_TYPE_NUMBER, 14, None, 10, 2, 1),
+        ("RATIO", oracledb.DB_TYPE_NUMBER, 127, None, 0, -127, 1),
+        ("DAY", oracledb.DB_TYPE_DATE, 23, None, None, None, 1),
+        ("TS", oracledb.DB_TYPE_TIMESTAMP, 23, None, 0, 6, 1),
+        ("NAME", oracledb.DB_TYPE_VARCHAR, 30, 30, None, None, 1),
+    ]
+    backend, _cursor = _connected(module_under_test, description)
+    backend.list_tables = mock.Mock(return_value=["T"])
+
+    schema = backend.get_schema("t", database="APP")
+
+    assert {name: str(typ) for name, typ in schema.items()} == {
+        "ID": "!decimal(8, 0)",
+        "AMT": "decimal(10, 2)",
+        "RATIO": "decimal",
+        "DAY": "date",
+        "TS": "timestamp",
+        "NAME": "string",
+    }

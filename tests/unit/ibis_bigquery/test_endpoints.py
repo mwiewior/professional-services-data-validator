@@ -67,19 +67,37 @@ def test_bigquery_emulator_connection_needs_no_google_credentials_or_storage_api
 
 
 def test_storage_api_disabled_reads_query_results_through_rest_only():
-    """With the Storage API disabled, `to_arrow` must never create a Storage API client."""
+    """With the Storage API disabled, a query's rows are read without a Storage API client."""
     from third_party.ibis.ibis_bigquery import Backend
 
     backend = Backend()
-    backend.storage_client = None
     backend.storage_api_disabled = True
-    backend.billing_project = "axis-local"
-    cursor = mock.Mock()
-    query_result = cursor.query.result.return_value
-    query_result._project = "axis-local"
+    rows = mock.Mock()
+    with mock.patch(
+        "ibis.backends.bigquery.Backend._to_query", return_value=rows
+    ):
+        result = backend._to_query("select 1")
 
-    backend._cursor_to_arrow(cursor)
-
-    _args, kwargs = query_result.to_arrow.call_args
+    result.to_arrow(progress_bar_type=None)
+    _args, kwargs = rows.to_arrow.call_args
     assert kwargs["create_bqstorage_client"] is False
     assert kwargs["bqstorage_client"] is None
+    assert kwargs["progress_bar_type"] is None
+
+    result.to_dataframe()
+    assert rows.to_dataframe.call_args.kwargs["create_bqstorage_client"] is False
+    result.to_arrow_iterable()
+    assert rows.to_arrow_iterable.call_args.kwargs["bqstorage_client"] is None
+    assert result.total_rows is rows.total_rows
+
+
+def test_storage_api_enabled_reads_query_results_as_they_are():
+    from third_party.ibis.ibis_bigquery import Backend
+
+    backend = Backend()
+    backend.storage_api_disabled = False
+    rows = mock.Mock()
+    with mock.patch(
+        "ibis.backends.bigquery.Backend._to_query", return_value=rows
+    ):
+        assert backend._to_query("select 1") is rows
