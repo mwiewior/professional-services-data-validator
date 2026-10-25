@@ -18,7 +18,7 @@ import pandas
 import logging
 import re
 import datetime
-from typing import List, Dict, TYPE_CHECKING
+from typing import Optional, List, Dict, TYPE_CHECKING
 
 from data_validation import cli_tools, consts, exceptions, util
 from data_validation.config_manager import ConfigManager
@@ -122,11 +122,12 @@ class PartitionBuilder:
         Returns:
             String with the where condition
         """
-        # This extraction of the where clause is a bit of a hack. To extract it correctly, the SQL table
-        # expression should be correctly parsed and the where clause extracted. Perhaps use something like Sqlglot.
-        sql_where_expr = re.split(
-            r"\sWHERE\s", util.ibis_table_to_sql(table_expr, client), flags=re.I
-        )[-1]
+        sql = util.ibis_table_to_sql(table_expr, client)
+        where = PartitionBuilder._parsed_where(sql, client)
+        if where is not None:
+            return where
+        # The SQL could not be parsed in the client's dialect: cut the text after its last WHERE.
+        sql_where_expr = re.split(r"\sWHERE\s", sql, flags=re.I)[-1]
 
         sql_string_re = re.compile(r"'(?:''|\\'|[^'])*'")
         sql_not_string_re = re.compile(r"[^']+")
@@ -142,6 +143,29 @@ class PartitionBuilder:
             sql_where_less_ws += repl_str
             sql_where_expr = sql_where_expr[match_obj.end() :]
         return sql_where_less_ws
+
+    @staticmethod
+    def _parsed_where(sql: str, client: "BaseBackend") -> Optional[str]:
+        """The outermost WHERE condition of `sql`, its columns without their table (ibis's `t0`),
+        written in the client's dialect; None when sqlglot can't parse it."""
+        import sqlglot
+        import sqlglot.expressions as sge
+
+        dialect = getattr(getattr(client, "compiler", None), "dialect", None) or None
+        try:
+            tree = sqlglot.parse_one(sql, dialect=dialect)
+        except sqlglot.errors.ParseError:
+            return None
+        where = tree.args.get("where") if isinstance(tree, sge.Select) else None
+        if where is None:
+            return None
+
+        def unqualify(node):
+            if isinstance(node, sge.Column) and node.table:
+                return sge.Column(this=node.this.copy())
+            return node
+
+        return where.this.transform(unqualify).sql(dialect=dialect)
 
     def _get_partition_key_filters(self) -> List[List[List[str]]]:
         """The PartitionBuilder object contains the configuration of the table pairs (source and target)

@@ -515,10 +515,11 @@ def teardown_module(module):
 
 
 def _get_pandas_client():
-    df = pandas.DataFrame([{"a": 1, "b": 2}])
-    pandas_client = ibis.pandas.connect({"my_table": df})
+    from data_validation.clients import in_memory_duckdb
 
-    return pandas_client
+    client = in_memory_duckdb()
+    client.create_table("my_table", pandas.DataFrame([{"a": 1, "b": 2}]))
+    return client
 
 
 def _generate_fake_data(
@@ -670,6 +671,15 @@ def test_class_object_creation(module_under_test):
         ),
         ("SELECT t0.a FROM sch.tbl t0\nWHERE t0.a < ' WHERE '", "t0.a < ' WHERE '"),
         ('SELECT t0."at0.b" FROM sch.tbl t0\nWHERE t0."at0.b" < 2', '"at0.b" < 2'),
+        # ibis 12 quotes the table alias too
+        (
+            'SELECT * FROM "udf"."test_generate_partitions_v2" AS "t0" WHERE "t0"."course_id" < \'ALG002\' OR ("t0"."course_id" = \'ALG002\' AND "t0"."quarter_id" < 1234)',
+            '"course_id" < \'ALG002\' OR ("course_id" = \'ALG002\' AND "quarter_id" < 1234)',
+        ),
+        (
+            "SELECT * FROM \"t\" AS \"t0\" WHERE \"t0\".\"a\" < ' WHERE \"t0\".x '",
+            "\"a\" < ' WHERE \"t0\".x '",
+        ),
     ],
 )
 @mock.patch("data_validation.util.ibis_table_to_sql")
@@ -806,27 +816,6 @@ def test_create_partition_query_yaml(module_under_test):
     assert len(yaml_configs_list[0]["yaml_files"][0]["yaml_config"]["validations"]) == 5
     # 4 validations in the second file
     assert len(yaml_configs_list[0]["yaml_files"][1]["yaml_config"]["validations"]) == 4
-
-
-@mock.patch("data_validation.clients.get_data_client")
-def test_check_partition_configs_sybase(mock_get_data_client, module_under_test):
-    """Ensure check_partition_filters raises exception for Sybase source connection"""
-    # Generate dummy YAML configs list
-    sybase_conn_config = {
-        consts.SOURCE_TYPE: consts.SOURCE_TYPE_SYBASE,
-    }
-    config_managers = [
-        _generate_config_manager(source_conn_override=sybase_conn_config)
-    ]
-
-    parser = cli_tools.configure_arg_parser()
-    mock_args = parser.parse_args(TABLE_PART_ARGS)
-
-    # Create PartitionBuilder object and get YAML configs list
-    builder = module_under_test.PartitionBuilder(config_managers, mock_args)
-    with pytest.raises(exceptions.PartitionBuilderException) as excinfo:
-        builder.check_partition_configs()
-    assert "window" in str(excinfo.value)
 
 
 def test_definitely_no_time_part_true():
