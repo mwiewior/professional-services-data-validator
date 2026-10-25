@@ -81,3 +81,22 @@ def test_an_engine_against_itself_passes_the_schema_check(name):
     rows = dvt_json("validate", "schema", "-sc", name, "-tc", name,
                     "-tbls", _tables(name, name))
     assert rows and not _failures(rows), _failures(rows)
+
+
+# Oracle's types against SQL Server's for dvt_core, as a migration's allow-list declares them
+ORACLE_MSSQL_PAIRS = ("!decimal(10,0):!int32,decimal(19,0):int64,string:string(30),"
+                      "string:string(5),timestamp:timestamp(6)")
+
+
+def test_oracle_against_sql_server_passes_the_schema_check_with_its_type_pairs():
+    """The SQL Server + SSIS epic's pair (#184): every check passes on equal tables."""
+    rows = dvt_json("validate", "schema", "-sc", "oracle", "-tc", "mssql",
+                    "-tbls", _tables("oracle", "mssql"), "--allow-list", ORACLE_MSSQL_PAIRS)
+    assert len(rows) == 8 and not _failures(rows), _failures(rows)
+
+
+def test_without_its_type_pairs_the_schema_check_names_each_difference():
+    rows = dvt_json("validate", "schema", "-sc", "oracle", "-tc", "mssql",
+                    "-tbls", _tables("oracle", "mssql"))
+    assert {r["source_column_name"].lower() for r in _failures(rows)} == {
+        "id", "col_int", "col_str", "col_char", "col_ts"}

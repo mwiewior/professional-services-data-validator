@@ -449,6 +449,9 @@ def _mssql_cast(self, op, original, *, arg, to):
     if from_.is_boolean() and to.is_string():
         return self.if_(arg.eq(0), sge.convert("false"), self.if_(arg.eq(1), sge.convert("true"),
                                                                    NULL))
+    if to.is_string():
+        # NVARCHAR: ibis's VARCHAR keeps only the database code page's characters
+        return sge.Cast(this=arg, to=_mssql_type("NVARCHAR(MAX)"))
     return original()
 
 
@@ -680,8 +683,10 @@ _ENGINE_TEXT = {
 }
 # a float's text as Oracle's (1.5, 0): Trino's own is scientific (1.5E0), DuckDB's keeps .0
 _FLOAT_TEXT = {
-    TrinoCompiler: lambda self, arg, original: _trimmed_decimal_text(
-        self, self.f.format(sge.convert("%s"), arg)),
+    # format('%s', NULL) is the text 'null': a NULL stays NULL
+    TrinoCompiler: lambda self, arg, original: self.if_(
+        sge.Is(this=arg, expression=NULL), NULL,
+        _trimmed_decimal_text(self, self.f.format(sge.convert("%s"), arg))),
     DuckDBCompiler: lambda self, arg, original: _trimmed_decimal_text(self, original()),
 }
 for _compiler, (_hex, _sha256) in _ENGINE_TEXT.items():

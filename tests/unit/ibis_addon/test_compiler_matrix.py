@@ -220,3 +220,16 @@ def test_sql_server_2019_hashes_text_through_a_utf8_collation():
         compiler.dialect))
     assert "convert(varchar(max), t0.s collate latin1_general_100_ci_as_sc_utf8)" in sql
     assert "collate" not in _sql(TABLE.s.hexdigest("sha256").name("h"), "mssql")
+
+
+def test_a_text_cast_on_sql_server_keeps_unicode():
+    """A VARCHAR keeps only the database code page's characters (Zażółć -> Zazólc)."""
+    not_null = ibis.table({"s": "!string"}, name="t")  # DVT's cast of a NOT NULL column
+    assert "cast(t0.s as nvarchar(max))" in _sql(not_null.s.cast("string").name("x"), "mssql")
+    assert "cast(t0.i as nvarchar(max))" in _sql(TABLE.i.cast("string").name("x"), "mssql")
+
+
+def test_a_null_float_on_trino_stays_null():
+    """format('%s', NULL) is the text 'null' on Trino: a NULL double keeps NULL."""
+    sql = _sql(TABLE.f.cast("string").name("x"), "trino")
+    assert "if(t0.f is null, null," in sql
