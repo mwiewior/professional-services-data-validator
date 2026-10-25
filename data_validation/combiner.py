@@ -29,7 +29,7 @@ import ibis
 import ibis.expr.datatypes as dt
 import pandas
 
-from data_validation import consts
+from data_validation import clients, consts
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -191,7 +191,7 @@ def _generate_report_slice(
     """
     # the two sides' results are compared in an in-memory DuckDB (ibis 10 removed its pandas
     # backend)
-    client = ibis.duckdb.connect()
+    client = clients.in_memory_duckdb()
     source = client.create_table(consts.RESULT_TYPE_SOURCE, _typed(source_df))
     target = client.create_table(consts.RESULT_TYPE_TARGET, _typed(target_df))
 

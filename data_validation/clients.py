@@ -211,6 +211,22 @@ def get_bigquery_client(
     )
 
 
+def in_memory_duckdb():
+    """An in-memory DuckDB, made from its backend class: `ibis.duckdb` and the backend's own
+    version check read package metadata, which a sandboxed or faked file system may hide."""
+    import duckdb
+    from ibis.backends.duckdb import Backend as DuckDBBackend
+
+    class _DuckDB(DuckDBBackend):
+        @property
+        def version(self) -> str:
+            return duckdb.__version__
+
+    client = _DuckDB()
+    client.do_connect()
+    return client
+
+
 def get_pandas_client(table_name, file_path, file_type):
     """Return pandas client and env with file loaded into DataFrame
 
@@ -230,7 +246,7 @@ def get_pandas_client(table_name, file_path, file_type):
         raise ValueError(f"Unknown Pandas File Type: {file_type}")
 
     # ibis 10 removed its pandas backend: the file's rows go into an in-memory DuckDB
-    client = ibis.duckdb.connect()
+    client = in_memory_duckdb()
     client.create_table(table_name, df)
     return client
 
