@@ -31,6 +31,7 @@ import sqlglot.expressions as sge
 from ibis.backends.sql.compilers import (
     BigQueryCompiler,
     DatabricksCompiler,
+    DuckDBCompiler,
     ImpalaCompiler,
     MSSQLCompiler,
     MySQLCompiler,
@@ -206,7 +207,9 @@ def _whitespace(self):
     not every engine reads escapes in a literal."""
     chars = sge.convert(" ")
     for c in string.whitespace.replace(" ", ""):
-        chars = sge.DPipe(this=chars, expression=self.f.chr(ord(c)), safe=True)
+        # CHR as a plain call: sqlglot's own Chr expression changes shape between releases
+        chr_ = sge.Anonymous(this="CHR", expressions=[sge.convert(ord(c))])
+        chars = sge.DPipe(this=chars, expression=chr_, safe=True)
     return chars
 
 
@@ -538,3 +541,18 @@ _method(SnowflakeCompiler, "HexDigest", _snowflake_hex_digest)
 _method(SnowflakeCompiler, "ExtractEpochSeconds",
         lambda self, op, *, arg: self.f.date_part(sge.Var(this="epoch_seconds"), arg))
 _method(SnowflakeCompiler, "RStrip", _whitespace_rstrip_chars)
+
+# --- DuckDB: where DVT compares the two sides' results (the combiner) --------------------------
+
+
+def _duckdb_cast(self, op, original, *, arg, to):
+    from_ = op.arg.dtype
+    if from_.is_binary() and to.is_string():
+        return self.f.lower(self.f.hex(arg))  # DVT reads a binary as its hex text
+    if from_.is_timestamp() and from_.timezone is not None and to.is_string():
+        # a zoned timestamp's text as Python writes it (+00:00), not DuckDB's +00
+        return self.f.regexp_replace(original(), r"([+-][0-9][0-9])$", r"\1:00")
+    return original()
+
+
+_wrap(DuckDBCompiler, "Cast", _duckdb_cast)

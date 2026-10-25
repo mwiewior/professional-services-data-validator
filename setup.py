@@ -36,8 +36,12 @@ dependencies = [
     # ibis 12 (the axis fork): every engine DVT compares is ibis's own backend; these are always
     # installed (DuckDB is where the two sides' results are compared), the rest are extras
     "ibis-framework[oracle,bigquery,impala,databricks,postgres,duckdb]==12.0.0",
+    # sqlglot 30 renders a Drop of a bare identifier as nothing, which ibis 12.0.0's DuckDB
+    # create_table relies on
+    "sqlglot>=27,<30",
     "jellyfish>=1.1.0",
-    "pandas",
+    # DVT's own result handling is written for pandas 2 (pandas 3 changes string dtypes)
+    "pandas>=2,<3",
     "parsy>=2.1",
     "psycopg2-binary>=2.9.9",
     "pyarrow",

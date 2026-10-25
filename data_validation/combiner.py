@@ -192,8 +192,8 @@ def _generate_report_slice(
     # the two sides' results are compared in an in-memory DuckDB (ibis 10 removed its pandas
     # backend)
     client = ibis.duckdb.connect()
-    source = client.create_table(consts.RESULT_TYPE_SOURCE, source_df)
-    target = client.create_table(consts.RESULT_TYPE_TARGET, target_df)
+    source = client.create_table(consts.RESULT_TYPE_SOURCE, _typed(source_df))
+    target = client.create_table(consts.RESULT_TYPE_TARGET, _typed(target_df))
 
     differences_pivot = _calculate_differences(
         source, target, join_on_fields, run_metadata.validations, is_value_comparison
@@ -211,9 +211,11 @@ def _generate_report_slice(
     target_pivot_df = client.execute(target_pivot)
 
     joined = _join_pivots(
-        client.create_table(consts.RESULT_TYPE_SOURCE, source_pivot_df, overwrite=True),
-        client.create_table(consts.RESULT_TYPE_TARGET, target_pivot_df, overwrite=True),
-        client.create_table(consts.RESULT_TYPE_DIFFERENCES, differences_df, overwrite=True),
+        client.create_table(consts.RESULT_TYPE_SOURCE, _typed(source_pivot_df), overwrite=True),
+        client.create_table(consts.RESULT_TYPE_TARGET, _typed(target_pivot_df), overwrite=True),
+        client.create_table(
+            consts.RESULT_TYPE_DIFFERENCES, _typed(differences_df), overwrite=True
+        ),
         join_on_fields,
     )
 
@@ -227,7 +229,20 @@ def _generate_report_slice(
     result_df["validation_status"] = result_df["validation_status"].fillna(
         consts.VALIDATION_STATUS_FAIL
     )
+    # DuckDB returns microsecond timestamps; DVT's results have always been nanosecond ones
+    for column in result_df.columns:
+        if pandas.api.types.is_datetime64_any_dtype(result_df[column]):
+            tz = getattr(result_df[column].dtype, "tz", None)
+            result_df[column] = result_df[column].astype(
+                f"datetime64[ns, {tz}]" if tz else "datetime64[ns]")
     return result_df
+
+
+def _typed(df: pandas.DataFrame) -> pandas.DataFrame:
+    """`df` with each column of only NULLs as text: DuckDB creates no column of NULL type, and
+    such a column (an absent value on every row) compares as NULL whatever its type."""
+    nulls = [c for c in df.columns if df[c].dtype == object and df[c].isna().all()]
+    return df.astype({c: "string" for c in nulls}) if nulls else df
 
 
 def _calculate_difference(
@@ -252,12 +267,12 @@ def _calculate_difference(
         source_value = (
             field_differences["differences_source_value"]
             .cast("float32")
-            .round(digits=4)
+            .round(4)
         )
         target_value = (
             field_differences["differences_target_value"]
             .cast("float32")
-            .round(digits=4)
+            .round(4)
         )
     else:
         source_value = field_differences["differences_source_value"]
@@ -275,18 +290,10 @@ def _calculate_difference(
             difference = pct_difference = ibis.null()
         else:
             difference = pct_difference = ibis.null().cast("float64")
-        validation_status = (
-            ibis.case()
-            .when(
-                target_value.isnull() & source_value.isnull(),
-                consts.VALIDATION_STATUS_SUCCESS,
-            )
-            .when(
-                target_value == source_value,
-                consts.VALIDATION_STATUS_SUCCESS,
-            )
-            .else_(consts.VALIDATION_STATUS_FAIL)
-            .end()
+        validation_status = ibis.cases(
+            (target_value.isnull() & source_value.isnull(), consts.VALIDATION_STATUS_SUCCESS),
+            (target_value == source_value, consts.VALIDATION_STATUS_SUCCESS),
+            else_=consts.VALIDATION_STATUS_FAIL,
         )
     else:
         difference = (target_value - source_value).cast("float64")
@@ -294,32 +301,24 @@ def _calculate_difference(
         pct_difference_nonzero = (
             ibis.literal(100.0)
             * difference.cast("float32")
-            / (
-                source_value.case()
-                .when(ibis.literal(0), target_value)
-                .else_(source_value)
-                .end()
+            / source_value.cases(
+                (ibis.literal(0), target_value), else_=source_value
             ).cast("float64")
         ).cast("float64")
 
         # Considers case that source and target agg values can both be 0
-        pct_difference = (
-            ibis.case()
-            .when(difference == ibis.literal(0), ibis.literal(0).cast("float64"))
-            .else_(pct_difference_nonzero)
-            .end()
+        pct_difference = ibis.cases(
+            (difference == ibis.literal(0), ibis.literal(0).cast("float64")),
+            else_=pct_difference_nonzero,
         )
 
         th_diff = (pct_difference.abs() - pct_threshold).cast("float64")
-        validation_status = (
-            ibis.case()
-            .when(
-                source_value.isnull() & target_value.isnull(),
-                consts.VALIDATION_STATUS_SUCCESS,
-            )
-            .when(th_diff.isnan() | (th_diff > 0.0), consts.VALIDATION_STATUS_FAIL)
-            .else_(consts.VALIDATION_STATUS_SUCCESS)
-            .end()
+        validation_status = ibis.cases(
+            (source_value.isnull() & target_value.isnull(), consts.VALIDATION_STATUS_SUCCESS),
+            # one side NULL: the old pandas engine's NaN arithmetic gave NaN, a failure; SQL's
+            # NULL arithmetic gives NULL, which must fail too
+            (th_diff.isnull() | th_diff.isnan() | (th_diff > 0.0), consts.VALIDATION_STATUS_FAIL),
+            else_=consts.VALIDATION_STATUS_SUCCESS,
         )
     return (
         difference.name(consts.VALIDATION_DIFFERENCE),
@@ -349,7 +348,9 @@ def _calculate_differences(
     if join_on_fields:
         # Use an inner join because a row must be present in source and target
         # for the difference to be well defined.
-        differences_joined = source.join(target, join_on_fields, how="inner")
+        differences_joined = source.join(
+            target, _same_keys(source, target, join_on_fields), how="inner"
+        )
     else:
         # When no join_on_fields are present, we expect only one row per table.
         # This is validated in generate_report before this function is called.
@@ -360,7 +361,7 @@ def _calculate_differences(
             continue
         target_type = target_schema.get(field, None)
         validation = validations[field]
-        field_differences = differences_joined.projection(
+        field_differences = differences_joined.select(
             [
                 source[field].name("differences_source_value"),
                 target[field].name("differences_target_value"),
@@ -380,10 +381,7 @@ def _calculate_differences(
                 )
             ]
         )
-    differences_pivot = functools.reduce(
-        lambda pivot1, pivot2: pivot1.union(pivot2), differences_pivots
-    )
-    return differences_pivot
+    return _union_all(differences_pivots)
 
 
 def _check_schema_names(source_df, target_df):
@@ -428,7 +426,7 @@ def _pivot_result(
                 )
 
             pivots.append(
-                result.projection(
+                result.select(
                     (
                         ibis.literal(field).name(consts.VALIDATION_NAME),
                         ibis.literal(validation.validation_type).name(
@@ -449,13 +447,30 @@ def _pivot_result(
                         ibis.literal(validation.num_random_rows).name(
                             consts.NUM_RANDOM_ROWS
                         ),
-                        result[field].cast("string").name(consts.COMBINER_AGG_VALUE),
+                        _agg_text(result[field]).name(consts.COMBINER_AGG_VALUE),
                     )
                     + join_on_fields
                 )
             )
-    pivot = functools.reduce(lambda pivot1, pivot2: pivot1.union(pivot2), pivots)
-    return pivot
+    return _union_all(pivots)
+
+
+def _agg_text(value):
+    """A result value as the text the report shows. A float NULL is "nan": the results came in as
+    pandas frames, whose float columns hold a NULL as NaN, which DVT has always written "nan"."""
+    text = value.cast("string")
+    return text.fill_null("nan") if value.type().is_floating() else text
+
+
+def _union_all(tables: list):
+    """UNION ALL of `tables`, as a balanced tree: one validation per column, and a chain of
+    hundreds of unions exceeds Python's recursion limit when ibis compiles it."""
+    while len(tables) > 1:
+        tables = [
+            tables[i].union(tables[i + 1]) if i + 1 < len(tables) else tables[i]
+            for i in range(0, len(tables), 2)
+        ]
+    return tables[0]
 
 
 def _as_json(expr):
@@ -466,9 +481,16 @@ def _as_json(expr):
     return (
         expr.cast("string")
         .fillna("null")
-        .re_replace(r"\\", r"\\\\")
-        .re_replace('"', '\\"')
+        # literal replacements: a regex replacement's escapes differ between engines
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
     )
+
+
+def _same_keys(left, right, keys) -> list:
+    """Join predicates on `keys` that match NULL to NULL, as pandas merges (DVT's old engine):
+    a group whose key is NULL on both sides is one group."""
+    return [left[key].identical_to(right[key]) for key in keys]
 
 
 def _join_pivots(
@@ -477,26 +499,10 @@ def _join_pivots(
     differences: "IbisTable",
     join_on_fields: tuple,
 ):
-    if join_on_fields:
-        join_values = []
-        for field in join_on_fields:
-            join_values.append(
-                ibis.literal(json.dumps(field))
-                + ibis.literal(': "')
-                + _as_json(target[field])
-                + ibis.literal('"')
-            )
-
-        group_by_columns = (
-            ibis.literal("{") + ibis.literal(", ").join(join_values) + ibis.literal("}")
-        ).name(consts.GROUP_BY_COLUMNS)
-    else:
-        group_by_columns = (
-            ibis.literal(None).cast("string").name(consts.GROUP_BY_COLUMNS)
-        )
-
     join_keys = (consts.VALIDATION_NAME,) + join_on_fields
-    source_difference = source.join(differences, join_keys, how="outer")[
+    source_difference = source.join(
+        differences, _same_keys(source, differences, join_keys), how="outer"
+    ).select(
         [source[field] for field in join_keys]
         + [
             source[consts.VALIDATION_TYPE],
@@ -511,9 +517,35 @@ def _join_pivots(
             differences[consts.VALIDATION_PCT_THRESHOLD],
             differences[consts.VALIDATION_STATUS],
         ]
-    ]
-    joined = source_difference.join(target, join_keys, how="outer")[
-        source_difference[consts.VALIDATION_NAME],
+    )
+    joined = source_difference.join(
+        target, _same_keys(source_difference, target, join_keys), how="outer"
+    )
+
+    def key(field):
+        # an outer join's key is the value from whichever side has the row, as pandas merges
+        return source_difference[field].coalesce(target[field])
+
+    if join_on_fields:
+        join_values = []
+        for field in join_on_fields:
+            join_values.append(
+                ibis.literal(json.dumps(field))
+                + ibis.literal(': "')
+                + _as_json(key(field))
+                + ibis.literal('"')
+            )
+
+        group_by_columns = (
+            ibis.literal("{") + ibis.literal(", ").join(join_values) + ibis.literal("}")
+        ).name(consts.GROUP_BY_COLUMNS)
+    else:
+        group_by_columns = (
+            ibis.literal(None).cast("string").name(consts.GROUP_BY_COLUMNS)
+        )
+
+    joined = joined.select(
+        key(consts.VALIDATION_NAME).name(consts.VALIDATION_NAME),
         source_difference[consts.VALIDATION_TYPE]
         .fillna(target[consts.VALIDATION_TYPE])
         .name(consts.VALIDATION_TYPE),
@@ -533,7 +565,7 @@ def _join_pivots(
         source_difference[consts.VALIDATION_PCT_DIFFERENCE],
         source_difference[consts.VALIDATION_PCT_THRESHOLD],
         source_difference[consts.VALIDATION_STATUS],
-    ]
+    )
     return joined
 
 
