@@ -17,16 +17,11 @@ from unittest import mock
 import pytest
 
 from google.auth import credentials
+import ibis
 import pandas
-import ibis.backends.pandas
-from ibis.backends.pandas import BasePandasBackend as PandasBackend
+from ibis.backends.duckdb import Backend as DuckDBBackend
 
 from data_validation import clients, consts, exceptions
-
-try:
-    import ibm_db_sa
-except Exception:
-    ibm_db_sa = None
 
 try:
     import oracledb
@@ -47,14 +42,6 @@ SOURCE_CONN_CONFIG = {
     "file_type": "json",
 }
 
-DB2_CONN_CONFIG = {
-    consts.SOURCE_TYPE: consts.SOURCE_TYPE_DB2,
-    "database": "db",
-    "host": "127.0.0.1",
-    "user": "u",
-    "password": "p",
-}
-
 ORACLE_CONN_CONFIG = {
     consts.SOURCE_TYPE: consts.SOURCE_TYPE_ORACLE,
     "host": "127.0.0.1",
@@ -62,41 +49,40 @@ ORACLE_CONN_CONFIG = {
 }
 
 
+def _catalog_and_database(database):
+    """ibis 12's `database=`: a database name, or (catalog, database)."""
+    return tuple(database) if isinstance(database, tuple) else (None, database)
+
+
 class RecordingBigQueryClient:
+    """Records ibis 12's table location: (table, catalog = the project, database = the dataset)."""
+
     name = "bigquery"
 
-    def table(self, table_name, database=None, schema=None):
-        return table_name, database, schema
+    def table(self, table_name, database=None):
+        return (table_name, *_catalog_and_database(database))
 
-    def get_schema(self, table_name, database=None, schema=None):
-        return table_name, database, schema
+    def get_schema(self, table_name, catalog=None, database=None):
+        return table_name, catalog, database
 
 
 class RecordingSnowflakeTable:
-    def __init__(self, table_name, database=None, schema=None):
+    def __init__(self, table_name, database=None):
         self.table_name = table_name
-        self.database = database
-        self.schema_name = schema
+        self.catalog, self.database = _catalog_and_database(database)
 
     def schema(self):
-        return self.table_name, self.database, self.schema_name
+        return self.table_name, self.catalog, self.database
 
 
 class RecordingSnowflakeClient:
     name = "snowflake"
 
-    def table(self, table_name, database=None, schema=None):
-        return RecordingSnowflakeTable(table_name, database=database, schema=schema)
+    def table(self, table_name, database=None):
+        return RecordingSnowflakeTable(table_name, database=database)
 
-
-class RecordingSpannerClient:
-    name = "spanner"
-
-    def table(self, table_name):
-        return table_name
-
-    def get_schema(self, table_name):
-        return table_name
+    def get_schema(self, table_name, catalog=None, database=None):
+        return table_name, catalog, database
 
 
 def _create_table_file(table_path, data):
@@ -106,10 +92,9 @@ def _create_table_file(table_path, data):
 
 
 def _get_pandas_client():
-    df = pandas.DataFrame(DATA)
-    pandas_client = ibis.pandas.connect({TABLE_NAME: df})
-
-    return pandas_client
+    client = ibis.duckdb.connect()
+    client.create_table(TABLE_NAME, pandas.DataFrame(DATA))
+    return client
 
 
 def test_get_all_tables():
@@ -228,22 +213,6 @@ def test_get_ibis_table_schema_uses_explicit_snowflake_database():
     assert schema == (TABLE_NAME, "SOURCE_DATABASE", "PUBLIC")
 
 
-def test_get_ibis_table_ignores_spanner_schema():
-    client = RecordingSpannerClient()
-
-    table = clients.get_ibis_table(client, "ignored_schema", TABLE_NAME)
-
-    assert table == TABLE_NAME
-
-
-def test_get_ibis_table_schema_ignores_spanner_schema():
-    client = RecordingSpannerClient()
-
-    schema = clients.get_ibis_table_schema(client, "ignored_schema", TABLE_NAME)
-
-    assert schema == TABLE_NAME
-
-
 def test_import_oracle_client():
     try:
         from third_party.ibis.ibis_oracle.api import oracle_connect  # noqa: F401
@@ -266,22 +235,5 @@ def test_get_pandas_data_client():
     _create_table_file(SOURCE_TABLE_FILE_PATH, JSON_DATA)
     ibis_client = clients.get_data_client(conn_config)
 
-    assert isinstance(ibis_client, PandasBackend)
-
-
-if ibm_db_sa:
-
-    @mock.patch("ibm_db.connect", return_value=mock.Mock())
-    @mock.patch("ibm_db_dbi.Connection", return_value=mock.MagicMock())
-    @mock.patch.object(ibm_db_sa.ibm_db.DB2Dialect_ibm_db, "get_isolation_level")
-    def test_get_db2_data_client(fn_mock, connection_mock, connect_mock):
-        # The import is good, we can test the code.
-        clients.get_data_client(DB2_CONN_CONFIG)
-
-else:
-
-    def test_get_db2_data_client_when_no_driver():
-        with pytest.raises(
-            exceptions.DataClientConnectionFailure, match=r".*pip install ibm_db_sa"
-        ):
-            clients.get_data_client(DB2_CONN_CONFIG)
+    assert isinstance(ibis_client, DuckDBBackend)
+    assert ibis_client.table("my_table").count().execute() == 2

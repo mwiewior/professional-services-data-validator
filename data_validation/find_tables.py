@@ -91,7 +91,7 @@ def _get_table_map_from_obj_list(table_objs: list) -> dict:
 
 
 def _get_table_map(
-    client: "ibis.backends.base.BaseBackend", allowed_schemas=None, include_views=False
+    client: "ibis.backends.BaseBackend", allowed_schemas=None, include_views=False
 ) -> dict:
     """Return dict with searchable keys for table matching."""
     table_objs = clients.get_all_tables(
@@ -101,8 +101,8 @@ def _get_table_map(
 
 
 def get_mapped_table_configs(
-    source_client: "ibis.backends.base.BaseBackend",
-    target_client: "ibis.backends.base.BaseBackend",
+    source_client: "ibis.backends.BaseBackend",
+    target_client: "ibis.backends.BaseBackend",
     allowed_schemas: list = None,
     include_views: bool = False,
     score_cutoff: int = 1,
@@ -151,8 +151,8 @@ def find_tables_using_string_matching(args) -> str:
 
 def expand_tables_of_asterisk(
     tables_list: list,
-    source_client: "ibis.backends.base.BaseBackend",
-    target_client: "ibis.backends.base.BaseBackend",
+    source_client: "ibis.backends.BaseBackend",
+    target_client: "ibis.backends.BaseBackend",
 ) -> list:
     """Pre-processes tables_mapping expanding any entries that are "schema.*". A shorthand for "find-tables" command.
 

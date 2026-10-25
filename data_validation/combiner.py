@@ -189,14 +189,11 @@ def _generate_report_slice(
             A pandas DataFrame with the results of the validation in the same
             schema as the report table.
     """
-    client = ibis.pandas.connect(
-        {
-            consts.RESULT_TYPE_SOURCE: source_df,
-            consts.RESULT_TYPE_TARGET: target_df,
-        }
-    )
-    source = client.table(consts.RESULT_TYPE_SOURCE)
-    target = client.table(consts.RESULT_TYPE_TARGET)
+    # the two sides' results are compared in an in-memory DuckDB (ibis 10 removed its pandas
+    # backend)
+    client = ibis.duckdb.connect()
+    source = client.create_table(consts.RESULT_TYPE_SOURCE, source_df)
+    target = client.create_table(consts.RESULT_TYPE_TARGET, target_df)
 
     differences_pivot = _calculate_differences(
         source, target, join_on_fields, run_metadata.validations, is_value_comparison
@@ -213,15 +210,11 @@ def _generate_report_slice(
     )
     target_pivot_df = client.execute(target_pivot)
 
-    con = ibis.pandas.connect(
-        {
-            consts.RESULT_TYPE_SOURCE: source_pivot_df,
-            consts.RESULT_TYPE_DIFFERENCES: differences_df,
-            consts.RESULT_TYPE_TARGET: target_pivot_df,
-        }
-    )
     joined = _join_pivots(
-        con.tables.source, con.tables.target, con.tables.differences, join_on_fields
+        client.create_table(consts.RESULT_TYPE_SOURCE, source_pivot_df, overwrite=True),
+        client.create_table(consts.RESULT_TYPE_TARGET, target_pivot_df, overwrite=True),
+        client.create_table(consts.RESULT_TYPE_DIFFERENCES, differences_df, overwrite=True),
+        join_on_fields,
     )
 
     documented, run_metadata = _add_metadata(joined, run_metadata)

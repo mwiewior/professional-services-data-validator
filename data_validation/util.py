@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ibis.expr.types.relations import Table as IbisTable
-    from ibis.backends.base import BaseBackend
+    from ibis.backends import BaseBackend
 
 
 def timed_call(log_txt, fn, *args, **kwargs):

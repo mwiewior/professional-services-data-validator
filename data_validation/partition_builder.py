@@ -28,7 +28,7 @@ from data_validation.validation_builder import list_to_sublists
 
 if TYPE_CHECKING:
     from argparse import Namespace
-    from ibis.backends.base import BaseBackend
+    from ibis.backends import BaseBackend
     from ibis.expr.types.relations import Table as IbisTable
 
 

@@ -21,7 +21,7 @@ class PartitionRowBuilder(object):
     def __init__(
         self,
         primary_keys: [str],
-        data_client: ibis.backends.base.BaseBackend,
+        data_client: ibis.backends.BaseBackend,
         schema_name: str,
         table_name: str,
         custom_query: str,
@@ -43,7 +43,7 @@ class PartitionRowBuilder(object):
 
     def _compile_query(
         self,
-        data_client: ibis.backends.base.BaseBackend,
+        data_client: ibis.backends.BaseBackend,
         schema_name: str,
         table_name: str,
         custom_query: str,

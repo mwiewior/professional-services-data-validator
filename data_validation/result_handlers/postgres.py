@@ -30,7 +30,7 @@ from data_validation.result_handlers.base_backend import (
 
 if TYPE_CHECKING:
     from pandas import DataFrame
-    from ibis.backends.base import BaseBackend
+    from ibis.backends import BaseBackend
 
 
 def _psql_insert_copy(table, conn, keys: list, data_iter: Iterable):

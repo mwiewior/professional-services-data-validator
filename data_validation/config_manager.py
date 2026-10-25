@@ -26,7 +26,7 @@ from data_validation.validation_builder import ValidationBuilder
 from third_party.ibis.ibis_addon.api import db2_type_string_length
 
 if TYPE_CHECKING:
-    from ibis.backends.base import BaseBackend
+    from ibis.backends import BaseBackend
     import ibis.expr.types.Table
 
 

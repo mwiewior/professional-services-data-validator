@@ -30,7 +30,7 @@ from data_validation.schema_validation import SchemaValidation
 from data_validation.validation_builder import ValidationBuilder
 
 if TYPE_CHECKING:
-    from ibis.backends.base import BaseBackend
+    from ibis.backends import BaseBackend
 
 """ The DataValidation class is where the code becomes source/target aware
 

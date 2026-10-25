@@ -89,7 +89,7 @@ class ValidationBuilder(object):
 
     @staticmethod
     def is_padded_char(
-        client: "ibis.backends.base.BaseBackend",
+        client: "ibis.backends.BaseBackend",
         raw_column_metadata: dict,
         column_name: str,
     ) -> bool:
@@ -402,7 +402,7 @@ class ValidationBuilder(object):
         self,
         calc_field: dict,
         column_name: str,
-        client: "ibis.backends.base.BaseBackend",
+        client: "ibis.backends.BaseBackend",
         raw_data_types: dict,
     ) -> str:
         if calc_field[

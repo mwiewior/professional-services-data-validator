@@ -22,22 +22,19 @@ from data_validation.query_builder.query_builder import QueryBuilder
 # Adding new data sources should be done by adding the Backend name here
 SUPPORTS_SORT_BY_RANDOM = [
     "bigquery",
+    "databricks",
+    "duckdb",
     "teradata",
     "impala",
     "oracle",
     "postgres",
     "mssql",
-    "db2",
     "mysql",
     "redshift",
     "snowflake",
-    "spanner",
-    "sybase",
 ]
 
-SUPPORTS_SORT_BY_ALIASED_RANDOM = [
-    "db2_zos",
-]
+SUPPORTS_SORT_BY_ALIASED_RANDOM = []
 
 
 class RandomRowBuilder(object):
@@ -53,7 +50,7 @@ class RandomRowBuilder(object):
 
     def compile(
         self,
-        data_client: ibis.backends.base.BaseBackend,
+        data_client: ibis.backends.BaseBackend,
         schema_name: str,
         table_name: str,
         query_builder: QueryBuilder,
@@ -73,7 +70,7 @@ class RandomRowBuilder(object):
         return randomly_sorted_table
 
     def compile_custom_query(
-        self, data_client: ibis.backends.base.BaseBackend, query: str
+        self, data_client: ibis.backends.BaseBackend, query: str
     ) -> ibis.Expr:
         """Return an Ibis query object for a given query.
 
@@ -88,7 +85,7 @@ class RandomRowBuilder(object):
         return query
 
     def maybe_add_random_sort(
-        self, data_client: ibis.backends.base.BaseBackend, table: ibis.Expr
+        self, data_client: ibis.backends.BaseBackend, table: ibis.Expr
     ) -> ibis.Expr:
         """Return a randomly sorted query if it is supported for the client."""
         if data_client.name in SUPPORTS_SORT_BY_ALIASED_RANDOM:
@@ -101,9 +98,8 @@ class RandomRowBuilder(object):
             )
 
         if data_client.name in SUPPORTS_SORT_BY_RANDOM:
-            # Teradata 'SAMPLE' and Spanner 'TABLESAMPLE' is random by nature
-            # and does not require a sort by
-            if data_client.name == "teradata" or data_client.name == "spanner":
+            # Teradata 'SAMPLE' is random by nature and does not require a sort by
+            if data_client.name == "teradata":
                 return table[self.primary_keys].limit(self.batch_size)
 
             return (

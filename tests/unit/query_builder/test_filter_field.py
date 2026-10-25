@@ -21,7 +21,6 @@ import pandas
 from data_validation.query_builder.query_builder import FilterField
 
 from third_party.ibis.ibis_bigquery import Backend as BigQueryBackend
-from third_party.ibis.ibis_cloud_spanner import Backend as SpannerBackend
 
 
 def test_filter_field_and():
@@ -163,7 +162,6 @@ def test_backend_class_tuple_in_supported():
         pass
 
     assert BigQueryBackend().dvt_tuple_in_supported() is True
-    assert SpannerBackend().dvt_tuple_in_supported() is True
 
     try:
         from third_party.ibis.ibis_sybase import Backend as SybaseBackend
