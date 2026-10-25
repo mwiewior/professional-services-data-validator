@@ -11,246 +11,93 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""DVT's Impala backend: ibis 12's, reached over HiveServer2 (Impala, Hive or a Spark Thrift
+server), with DVT's own reading of the server's type names (Spark's `timestamp_ntz` included)."""
 
+import re
 from functools import lru_cache
-import ibis
-from ibis.backends.impala import Backend as ImpalaBackend
-from ibis.backends.impala.client import ImpalaConnection
-
 from typing import Literal
 
-from ibis.backends.impala import udf
-from ibis.backends.impala.compiler import rewrites
+import ibis
 import ibis.expr.datatypes as dt
-import ibis.expr.operations as ops
 import ibis.expr.schema as sch
-import numpy as np
-import fsspec
-import re
+from ibis.backends.impala import Backend as ImpalaBackend
 
-# Issue-1525: datetime64[ns] overflows datetimes way in the future.
-# Using "object" instead which is what BigQuery implementation results in.
-_DVT_HS2_TTypeId_to_dtype = ibis.backends.impala._HS2_TTypeId_to_dtype.copy()
-_DVT_HS2_TTypeId_to_dtype["TIMESTAMP"] = "object"
-
-
-def do_connect(
-    # Override do_connect to add use_http_transport and http_path params
-    self,
-    host: str = "localhost",
-    port: int = 10000,
-    database: str = "default",
-    timeout: int = 45,
-    use_ssl: bool = False,
-    ca_cert: str = None,
-    user: str = None,
-    password: str = None,
-    auth_mechanism: Literal["NOSASL", "PLAIN", "GSSAPI", "LDAP"] = "PLAIN",
-    kerberos_service_name: str = "impala",
-    pool_size: int = 8,
-    hdfs_client: fsspec.spec.AbstractFileSystem = None,
-    use_http_transport: bool = False,
-    http_path: str = "",
-):
-    self._temp_objects = set()
-    self._hdfs = hdfs_client
-
-    params = {
-        "host": host,
-        "port": port,
-        "database": database,
-        "timeout": timeout,
-        "use_ssl": use_ssl,
-        "ca_cert": ca_cert,
-        "user": user,
-        "password": password,
-        "auth_mechanism": auth_mechanism,
-        "kerberos_service_name": kerberos_service_name,
-        "use_http_transport": use_http_transport,
-        "http_path": http_path,
-    }
-    self.con = ImpalaConnection(pool_size=pool_size, **params)
-    self._ensure_temp_db_exists()
+_SIMPLE_TYPES = {
+    "boolean": dt.boolean, "tinyint": dt.int8, "smallint": dt.int16, "int": dt.int32,
+    "integer": dt.int32, "bigint": dt.int64, "float": dt.float32, "double": dt.float64,
+    "real": dt.float64, "string": dt.string, "date": dt.date, "timestamp": dt.timestamp,
+    # Spark 3.4+'s zone-less timestamp (Databricks, the Spark emulator)
+    "timestamp_ntz": dt.timestamp, "binary": dt.binary,
+}
 
 
-def parse_type(t):
-    """Returns the Ibis datatype from source type."""
-    t = t.lower()
-    # Spark SQL's zone-less timestamp (Databricks, Spark 3.4+), read through the Thrift server
-    if t == "timestamp_ntz":
-        return "timestamp"
-    if t in udf._impala_to_ibis_type:
-        return udf._impala_to_ibis_type[t]
-    else:
-        if "varchar" in t or "char" in t:
-            return "string"
-        elif "decimal" in t:
-            result = dt.dtype(t)
-            if result:
-                return t
-            else:
-                return ValueError(t)
-        elif "struct" in t or "array" in t or "map" in t:
-            # Supports parsing through structs/arrays in schema in #444
-            if "bigint" in t:
-                t = t.replace(":bigint", ":int64")
-            elif "tinyint" in t:
-                t = t.replace(":tinyint", ":int8")
-            elif "smallint" in t:
-                t = t.replace(":smallint", ":int16")
-            else:
-                t = t.replace(":int", ":int32")
-
-            if "varchar" in t:
-                t = t.replace(":varchar", ":string")
-            else:
-                t = t.replace(":char", ":string")
-            return t
-        elif "binary" in t:
-            return "binary"
-        else:
-            raise Exception(t)
-
-
-def get_schema(self, table_name, database=None):
-    """
-    Return a Schema object for the indicated table and database
-
-    Parameters
-    ----------
-    table_name : string
-      May be fully qualified
-    database : string, default None
-
-    Returns
-    -------
-    schema : ibis Schema
-    """
-    qualified_name = self._fully_qualified_name(table_name, database)
-    query = "DESCRIBE {}".format(qualified_name)
-
-    pairs = []
-    for row in self.con.fetchall(query):
-        # Add check for empty row for Hive partitioned tables in #375
-        if row[0] == "":
-            break
-        pairs.append(row[:2])
-
-    names, types = zip(*pairs)
-    ibis_types = [parse_type(type.lower()) for type in types]
-    ibis_fields = dict(zip(names, ibis_types))
-
-    return sch.Schema(ibis_fields)
-
-
-def _chunks_to_pandas_array(chunks):
-    total_length = 0
-    have_nulls = False
-    for c in chunks:
-        total_length += len(c)
-        have_nulls = have_nulls or c.nulls.any()
-
-    type_ = chunks[0].data_type
-    numpy_type = _DVT_HS2_TTypeId_to_dtype[type_]
-
-    def fill_nonnull(target, chunks):
-        pos = 0
-        for c in chunks:
-            target[pos : pos + len(c)] = c.values
-            pos += len(c.values)
-
-    def fill(target, chunks, na_rep):
-        pos = 0
-        for c in chunks:
-            nulls = c.nulls.copy()
-            nulls.bytereverse()
-            bits = np.frombuffer(nulls.tobytes(), dtype="u1")
-            mask = np.unpackbits(bits).view(np.bool_)
-
-            k = len(c)
-
-            dest = target[pos : pos + k]
-            dest[:] = c.values
-            dest[mask[:k]] = na_rep
-
-            pos += k
-
-    if have_nulls:
-        # Updating NaN to None for consistency across DBs as per #406
-        if numpy_type in ("bool", "datetime64[ns]"):
-            target = np.empty(total_length, dtype="O")
-            na_rep = None
-        elif numpy_type.startswith("int"):
-            target = np.empty(total_length, dtype="f8")
-            na_rep = np.nan
-        elif numpy_type in ("object"):
-            target = np.empty(total_length, dtype=object)
-            na_rep = None
-        else:
-            target = np.empty(total_length, dtype=numpy_type)
-            na_rep = np.nan
-
-        fill(target, chunks, na_rep)
-    else:
-        target = np.empty(total_length, dtype=numpy_type)
-        fill_nonnull(target, chunks)
-
-    return target
+def parse_type(t: str) -> dt.DataType:
+    """The ibis type of a HiveServer2 type name (DESCRIBE's, or a cursor description's)."""
+    t = t.lower().strip()
+    if t in _SIMPLE_TYPES:
+        return _SIMPLE_TYPES[t]
+    if t.startswith(("varchar", "char")):
+        return dt.string
+    if t.startswith("decimal"):
+        match = re.match(r"decimal\((\d+),\s*(\d+)\)", t)
+        return dt.Decimal(int(match[1]), int(match[2])) if match else dt.Decimal()
+    if t.startswith(("struct", "array", "map")):
+        # Supports parsing through structs/arrays in schema in #444
+        t = re.sub(r":(bigint)\b", ":int64", t)
+        t = re.sub(r":(tinyint)\b", ":int8", t)
+        t = re.sub(r":(smallint)\b", ":int16", t)
+        t = re.sub(r":(int)\b", ":int32", t)
+        t = re.sub(r":(varchar|char)(\(\d+\))?", ":string", t)
+        return dt.dtype(t)
+    raise NotImplementedError(f"Unsupported HiveServer2 type: {t}")
 
 
 def update_query_with_limit(query):
     limit_pattern = re.compile(r"LIMIT\s+\d+(\s+OFFSET\s+\d+)?\s*;?\s*$", re.IGNORECASE)
     last_limit_match = limit_pattern.search(query)
-
     if last_limit_match:
-        new_query = (
-            query[: last_limit_match.start()]
-            + "LIMIT 1"
-            + query[last_limit_match.end() :]
-        )
-    else:
-        new_query = query + " LIMIT 1"
-
-    return new_query
+        return query[: last_limit_match.start()] + "LIMIT 1" + query[last_limit_match.end():]
+    return query + " LIMIT 1"
 
 
-@lru_cache(maxsize=2)
-def _get_schema_using_query(self, query):
-    # Removing LIMIT 0 around query since it returns no results in Hive
-    updated_query = update_query_with_limit(query)
-    cur = self.raw_sql(updated_query)
-    cur.fetchone()
-    cur.description = [
-        (
-            description[0].split(".")[-1] if "." in description[0] else description[0],
-            *description[1:],
-        )
-        for description in cur.description
-    ]
-    ibis_fields = self._adapt_types(cur.description)
-    cur.release()
+class Backend(ImpalaBackend):
+    def get_schema(self, table_name, *, catalog=None, database=None) -> sch.Schema:
+        name = f"`{database}`.`{table_name}`" if database else f"`{table_name}`"
+        with self.con.cursor() as cur:
+            cur.execute(f"DESCRIBE {name}")
+            rows = cur.fetchall()
+        pairs = []
+        for row in rows:
+            # Add check for empty row for Hive partitioned tables in #375
+            if row[0] == "" or row[0].startswith("#"):
+                break
+            pairs.append((row[0], parse_type(row[1])))
+        return sch.Schema(dict(pairs))
 
-    return sch.Schema(ibis_fields)
+    @lru_cache(maxsize=2)
+    def _get_schema_using_query(self, query):
+        # Removing LIMIT 0 around query since it returns no results in Hive
+        with self.con.cursor() as cur:
+            cur.execute(update_query_with_limit(query))
+            cur.fetchall()
+            fields = {}
+            for name, type_code, _display, _internal, precision, scale, _null_ok in cur.description:
+                name = name.split(".")[-1]
+                type_name = type_code.lower()
+                if type_name == "decimal" and precision is not None:
+                    fields[name] = dt.Decimal(precision, scale)
+                else:
+                    fields[name] = parse_type(type_name)
+        return sch.Schema(fields)
 
+    def list_primary_key_columns(self, database: str, table: str) -> list:
+        """No primary keys in Hadoop."""
+        return None
 
-def _list_primary_key_columns(self, database: str, table: str) -> list:
-    """No primary keys in Hadoop."""
-    return None
-
-
-def _dvt_list_tables(self, like=None, database=None):
-    """dvt_list_tables is a pass through on Hadoop due to "show tables" behaviour."""
-    return self.list_tables(like=like, database=database)
-
-
-udf._impala_to_ibis_type["binary"] = "binary"
-udf.parse_type = parse_type
-ibis.backends.impala._chunks_to_pandas_array = _chunks_to_pandas_array
-ImpalaBackend.get_schema = get_schema
-ImpalaBackend._get_schema_using_query = _get_schema_using_query
-ImpalaBackend.do_connect = do_connect
-ImpalaBackend.list_primary_key_columns = _list_primary_key_columns
-ImpalaBackend.dvt_list_tables = _dvt_list_tables
+    def dvt_list_tables(self, like=None, database=None):
+        """dvt_list_tables is a pass through on Hadoop due to "show tables" behaviour."""
+        return self.list_tables(like=like, database=database)
 
 
 def impala_connect(
@@ -265,24 +112,15 @@ def impala_connect(
     auth_mechanism: Literal["NOSASL", "PLAIN", "GSSAPI", "LDAP"] = "PLAIN",
     kerberos_service_name: str = "impala",
     pool_size: int = 8,
-    hdfs_client: fsspec.spec.AbstractFileSystem = None,
+    hdfs_client=None,
     use_http_transport: bool = False,
     http_path: str = "",
 ):
-    backend = ibis.impala.connect(
-        host=host,
-        port=port,
-        database=database,
-        timeout=timeout,
-        use_ssl=use_ssl,
-        ca_cert=ca_cert,
-        user=user,
-        password=password,
-        auth_mechanism=auth_mechanism,
-        kerberos_service_name=kerberos_service_name,
-        pool_size=pool_size,
-        hdfs_client=hdfs_client,
-        use_http_transport=use_http_transport,
+    backend = Backend()
+    backend.do_connect(
+        host=host, port=int(port), database=database, timeout=timeout, use_ssl=use_ssl,
+        ca_cert=ca_cert, user=user, password=password, auth_mechanism=auth_mechanism,
+        kerberos_service_name=kerberos_service_name, use_http_transport=use_http_transport,
         http_path=http_path,
     )
     try:

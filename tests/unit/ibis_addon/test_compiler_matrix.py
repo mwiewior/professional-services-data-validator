@@ -11,262 +11,153 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""What DVT's operations compile to on each engine (ibis 12, sqlglot dialects), compared without
+case, quotes or spacing, so a fragment pins the SQL's meaning and not ibis's formatting."""
 
-import importlib.metadata
+import re
 
 import ibis
 import pytest
-from ibis.backends.bigquery.compiler import BigQueryCompiler
-from ibis.backends.impala.compiler import ImpalaCompiler
-from ibis.backends.mssql.compiler import MsSqlCompiler
-from ibis.backends.mysql.compiler import MySQLCompiler
-from ibis.backends.postgres.compiler import PostgreSQLCompiler
 
 # Import required in order to register DVT operations.
-import third_party.ibis.ibis_addon.operations  # noqa: F401
-from third_party.ibis.ibis_cloud_spanner.compiler import SpannerCompiler
-from third_party.ibis.ibis_redshift.compiler import RedshiftCompiler
-
-try:
-    from ibis.backends.snowflake import SnowflakeCompiler
-except (ImportError, importlib.metadata.PackageNotFoundError) as exc:
-    SnowflakeCompiler = None
-    SNOWFLAKE_SKIP_REASON = f"Snowflake compiler unavailable: {exc}"
-else:
-    SNOWFLAKE_SKIP_REASON = ""
-
-# Note: We do not add pure SQLAlchemy backends (e.g., Db2) to this compiler matrix.
-# This matrix uses `ibis.table(..., name="t")` to create an UnboundTable. In Ibis 7+,
-# compiling an UnboundTable for an AlchemyBackend invokes `sqlglot` to resolve the
-# table's fully qualified name. Because our custom Db2 backend uses a custom dialect
-# name ("db2") that `sqlglot` does not natively recognize, it will throw an
-# "Unknown dialect" ValueError.
-#
-# In an actual DVT run, tables are bound to the backend (DatabaseTable), completely
-# bypassing `sqlglot` and using SQLAlchemy natively. Testing via `sqlglot` here is
-# disconnected from the true execution path and requires misleading monkey patches.
-
-try:
-    from third_party.ibis.ibis_teradata.compiler import TeradataCompiler
-except ImportError as exc:
-    TeradataCompiler = None
-    TERADATA_SKIP_REASON = f"Teradata compiler unavailable: {exc}"
-else:
-    TERADATA_SKIP_REASON = ""
-
-try:
-    from third_party.ibis.ibis_oracle.compiler import OracleCompiler
-except ModuleNotFoundError as exc:
-    OracleCompiler = None
-    ORACLE_SKIP_REASON = f"Oracle compiler unavailable: missing {exc.name}"
-else:
-    ORACLE_SKIP_REASON = ""
+import third_party.ibis.ibis_addon.operations as operations
 
 TABLE = ibis.table(
     {
         "s": "string",
         "b": "binary",
         "d": "decimal(10, 2)",
+        "u": "decimal",
+        "f": "float64",
         "ts": "timestamp",
+        "bo": "boolean",
+        "i": "int32",
     },
     name="t",
 )
 
 
-def _compile(compiler_class, expr):
-    return str(compiler_class().to_sql(expr))
+def _norm(sql: str) -> str:
+    sql = re.sub(r"\s+", " ", re.sub(r'["`\[\]]', "", sql)).lower()
+    return re.sub(r"\(\s+", "(", re.sub(r"\s+\)", ")", sql))
 
 
-def _assert_fragments(sql, expected_fragments, unexpected_fragments):
-    for fragment in expected_fragments:
-        assert fragment in sql
-    for fragment in unexpected_fragments:
-        assert fragment not in sql
+def _sql(expr, dialect) -> str:
+    return _norm(str(ibis.to_sql(expr, dialect=dialect)))
 
 
-HASHBYTES_COMPILER_CASES = [
-    pytest.param(
-        BigQueryCompiler,
-        ["TO_HEX(SHA256(t0.`s`))"],
-        [],
-        id="bigquery",
-    ),
-    pytest.param(
-        PostgreSQLCompiler,
-        ["encode(sha256(convert_to(t0.s, 'UTF8')), 'hex')"],
-        [],
-        id="postgres",
-    ),
-    pytest.param(
-        MySQLCompiler,
-        ["sha2(t0.s, '256')"],
-        [],
-        id="mysql",
-    ),
-    pytest.param(
-        MsSqlCompiler,
-        ["hashbytes('SHA2_256'", "convert(VARCHAR(MAX), t0.s)"],
-        [],
-        id="mssql",
-    ),
-    pytest.param(
-        ImpalaCompiler,
-        ["sha2(t0.`s`, 256)"],
-        [],
-        id="impala",
-    ),
-    pytest.param(
-        RedshiftCompiler,
-        ["sha2(t0.s, 256)"],
-        [],
-        id="redshift",
-    ),
-    pytest.param(
-        SpannerCompiler,
-        ["TO_HEX(SHA256(t0.`s`))"],
-        [],
-        id="spanner",
-    ),
-    pytest.param(
-        SnowflakeCompiler,
-        ['sha2(t0."s")'],
-        [],
-        id="snowflake",
-        marks=pytest.mark.skipif(
-            SnowflakeCompiler is None,
-            reason=SNOWFLAKE_SKIP_REASON,
-        ),
-    ),
-    pytest.param(
-        TeradataCompiler,
-        ['rtrim(hash_sha256(TransUnicodeToUTF8(t0."s")))'],
-        [],
-        id="teradata",
-        marks=pytest.mark.skipif(
-            TeradataCompiler is None,
-            reason=TERADATA_SKIP_REASON,
-        ),
-    ),
-    pytest.param(
-        OracleCompiler,
-        ["standard_hash(convert(t0.s, 'UTF8'), 'SHA256')"],
-        [],
-        id="oracle",
-        marks=pytest.mark.skipif(
-            OracleCompiler is None,
-            reason=ORACLE_SKIP_REASON,
-        ),
-    ),
-]
+HEXDIGEST = {
+    "bigquery": "to_hex(sha256(t0.s))",
+    "postgres": "encode(sha256(convert_to(t0.s, 'utf8')), 'hex')",
+    "mysql": "sha2(t0.s, '256')",
+    "mssql": "lower(convert(char(64), hashbytes('sha2_256', convert(varchar(max), t0.s)), 2))",
+    "impala": "sha2(t0.s, 256)",
+    "databricks": "sha2(t0.s, 256)",
+    "snowflake": "sha2(t0.s)",
+    "oracle": "lower(standard_hash(convert(t0.s, 'utf8'), 'sha256'))",
+    "duckdb": "sha256(t0.s)",
+}
+
+BINARY_LENGTH = {
+    "bigquery": "length(t0.b)",
+    "postgres": "length(t0.b)",
+    "mysql": "length(t0.b)",
+    "mssql": "cast(datalength(t0.b) as bigint)",
+    "impala": "length(t0.b)",
+    "databricks": "length(t0.b)",
+    "snowflake": "length(t0.b)",
+    "oracle": "dbms_lob.getlength(t0.b)",
+}
+
+DECIMAL_TO_STRING = {
+    "oracle": "case when t0.d > 0 and t0.d < 1 then concat('0', to_char(t0.d))",
+    # Postgres writes rtrim(x, '.') as TRIM(TRAILING '.' FROM x)
+    "postgres": "trim(trailing '.' from to_char(t0.d, 'fm99999990.99'))",
+    "mysql": "cast(t0.d as char) + 0",
+    "mssql": "format(t0.d, '0.##')",
+    "snowflake": "rtrim(to_char(t0.d, 'fm99999990.99'), '.')",
+    "impala": "regexp_replace(regexp_replace(cast(t0.d as string), '([.][0-9]*?)0+$', '$1'), '[.]$', '')",
+    "databricks": "regexp_replace(regexp_replace(cast(t0.d as string), '([.][0-9]*?)0+$', '$1'), '[.]$', '')",
+}
+
+BINARY_TO_STRING = {
+    "oracle": "lower(rawtohex(t0.b))",
+    "bigquery": "to_hex(t0.b)",
+    "postgres": "encode(t0.b, 'hex')",
+    "mysql": "lower(hex(t0.b))",
+    "mssql": "lower(convert(varchar(max), t0.b, 2))",
+    "snowflake": "hex_encode(t0.b, 0)",
+    "impala": "lower(hex(t0.b))",
+    "databricks": "lower(hex(t0.b))",
+}
+
+EPOCH_SECONDS = {
+    "bigquery": "unix_seconds(cast(t0.ts as timestamp))",
+    "oracle": "cast((cast(t0.ts as date) - to_date('1970-01-01', 'yyyy-mm-dd')) * 86400 as number(38, 0))",
+    "postgres": "cast(extract(epoch from date_trunc('second', t0.ts)) as bigint)",
+    "mssql": "cast(datediff_big(s, cast('1970-01-01 00:00:00' as datetime2), cast(t0.ts as datetime2)) as bigint)",
+}
+
+RSTRIP = {
+    "oracle": "rtrim(t0.s, ' ' || chr(9) || chr(10) || chr(13) || chr(11) || chr(12))",
+    "impala": "trim(trailing ' ' || chr(9) || chr(10) || chr(13) || chr(11) || chr(12) from t0.s)",
+    "databricks": "trim(trailing ' ' || chr(9) || chr(10) || chr(13) || chr(11) || chr(12) from t0.s)",
+    "mssql": "rtrim(cast(t0.s as varchar(max)))",
+}
 
 
-BINARY_LENGTH_COMPILER_CASES = [
-    pytest.param(
-        BigQueryCompiler,
-        ["LENGTH(t0.`b`)"],
-        [],
-        id="bigquery",
-    ),
-    pytest.param(
-        PostgreSQLCompiler,
-        ["length(t0.b)"],
-        [],
-        id="postgres",
-    ),
-    pytest.param(
-        MySQLCompiler,
-        ["length(t0.b)"],
-        [],
-        id="mysql",
-    ),
-    pytest.param(
-        MsSqlCompiler,
-        ["datalength(t0.b)"],
-        [],
-        id="mssql",
-    ),
-    pytest.param(
-        ImpalaCompiler,
-        ["length(t0.`b`)"],
-        [":length"],
-        id="impala",
-    ),
-    pytest.param(
-        RedshiftCompiler,
-        ["length(t0.b)"],
-        [],
-        id="redshift",
-    ),
-    pytest.param(
-        SpannerCompiler,
-        ["length(t0.`b`)"],
-        [":length"],
-        id="spanner",
-    ),
-    pytest.param(
-        SnowflakeCompiler,
-        ['length(t0."b")'],
-        [],
-        id="snowflake",
-        marks=pytest.mark.skipif(
-            SnowflakeCompiler is None,
-            reason=SNOWFLAKE_SKIP_REASON,
-        ),
-    ),
-    pytest.param(
-        TeradataCompiler,
-        ['length(t0."b")'],
-        [":length"],
-        id="teradata",
-        marks=pytest.mark.skipif(
-            TeradataCompiler is None,
-            reason=TERADATA_SKIP_REASON,
-        ),
-    ),
-    pytest.param(
-        OracleCompiler,
-        ["dbms_lob.getlength(t0.b)"],
-        [],
-        id="oracle",
-        marks=pytest.mark.skipif(
-            OracleCompiler is None,
-            reason=ORACLE_SKIP_REASON,
-        ),
-    ),
-]
+@pytest.mark.parametrize("dialect,fragment", HEXDIGEST.items())
+def test_hexdigest(dialect, fragment):
+    assert _norm(fragment) in _sql(TABLE.s.hexdigest("sha256").name("h"), dialect)
 
 
-@pytest.mark.parametrize(
-    "compiler_class,expected_fragments,unexpected_fragments",
-    HASHBYTES_COMPILER_CASES,
-)
-def test_hashbytes_compiler_matrix(
-    compiler_class, expected_fragments, unexpected_fragments
-):
-    sql = _compile(compiler_class, TABLE.s.hashbytes().name("h"))
-
-    _assert_fragments(sql, expected_fragments, unexpected_fragments)
+@pytest.mark.parametrize("dialect,fragment", BINARY_LENGTH.items())
+def test_binary_length(dialect, fragment):
+    assert _norm(fragment) in _sql(TABLE.b.byte_length().name("n"), dialect)
 
 
-@pytest.mark.parametrize(
-    "compiler_class,expected_fragments,unexpected_fragments",
-    BINARY_LENGTH_COMPILER_CASES,
-)
-def test_binary_length_compiler_matrix(
-    compiler_class, expected_fragments, unexpected_fragments
-):
-    sql = _compile(compiler_class, TABLE.b.byte_length().name("len"))
-
-    _assert_fragments(sql, expected_fragments, unexpected_fragments)
+@pytest.mark.parametrize("dialect,fragment", DECIMAL_TO_STRING.items())
+def test_a_decimal_to_string_has_no_trailing_zeros_nor_lost_leading_zero(dialect, fragment):
+    assert _norm(fragment) in _sql(TABLE.d.cast("string").name("x"), dialect)
 
 
-def test_bigquery_epoch_seconds_compiles_timestamp_cast():
-    sql = _compile(BigQueryCompiler, TABLE.ts.epoch_seconds().name("epoch"))
+@pytest.mark.parametrize("dialect,fragment", BINARY_TO_STRING.items())
+def test_a_binary_to_string_is_its_lower_case_hex(dialect, fragment):
+    assert _norm(fragment) in _sql(TABLE.b.cast("string").name("x"), dialect)
 
-    assert "UNIX_SECONDS(CAST(t0.`ts` AS TIMESTAMP))" in sql
+
+@pytest.mark.parametrize("dialect,fragment", EPOCH_SECONDS.items())
+def test_epoch_seconds(dialect, fragment):
+    assert _norm(fragment) in _sql(TABLE.ts.epoch_seconds().name("x"), dialect)
 
 
-def test_postgres_decimal_string_cast_compiles_to_char():
-    sql = _compile(PostgreSQLCompiler, TABLE.d.cast("string").name("dstr"))
+@pytest.mark.parametrize("dialect,fragment", RSTRIP.items())
+def test_rstrip_strips_every_whitespace_character(dialect, fragment):
+    assert _norm(fragment) in _sql(TABLE.s.rstrip().name("x"), dialect)
 
-    assert "rtrim(to_char(t0.d, :to_char_1), :rtrim_1)" in sql
+
+@pytest.mark.parametrize("dialect", ["bigquery", "impala", "databricks"])
+def test_strftime_reads_a_timestamp_as_it_is(dialect):
+    sql = _sql(TABLE.ts.strftime("%Y-%m-%d %H:%M:%S").name("x"), dialect)
+    expected = {
+        "bigquery": "format_datetime('%e4y-%m-%d %t', datetime(t0.ts))",
+        "impala": "date_format(t0.ts, 'yyyy-mm-dd hh:mm:ss')",
+        "databricks": "date_format(t0.ts, 'yyyy-mm-dd hh:mm:ss')",
+    }[dialect]
+    assert expected in sql
+
+
+def test_a_raw_sql_filter_is_taken_as_it_is():
+    sql = _sql(TABLE.filter(operations.compile_raw_sql(TABLE, "s = 'x'")).count(), "oracle")
+    assert "where (s = 'x')" in sql
+
+
+@pytest.mark.parametrize("dialect", ["mssql"])
+def test_a_single_column_concat_is_the_column(dialect):
+    sql = _sql(ibis.literal("").join([TABLE.s]).name("x"), dialect)
+    assert "concat(" not in sql
+
+
+def test_an_integer_sum_and_mean_on_sql_server_avoid_int_overflow_and_truncation():
+    assert "sum(cast(t0.i as bigint))" in _sql(TABLE.i.sum().name("x"), "mssql")
+    assert "avg(cast(t0.i as float))" in _sql(TABLE.i.mean().name("x"), "mssql")

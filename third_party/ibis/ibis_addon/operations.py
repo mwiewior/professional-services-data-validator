@@ -32,8 +32,12 @@ from ibis.backends.sql.compilers import (
     BigQueryCompiler,
     DatabricksCompiler,
     ImpalaCompiler,
+    MSSQLCompiler,
+    MySQLCompiler,
     OracleCompiler,
+    PostgresCompiler,
     PySparkCompiler,
+    SnowflakeCompiler,
 )
 from ibis.backends.sql.compilers.base import SQLGlotCompiler
 from ibis.expr.types import (
@@ -206,8 +210,11 @@ def _whitespace(self):
     return chars
 
 
-def _oracle_whitespace_rstrip(self, op, *, arg):
+def _whitespace_rstrip_chars(self, op, *, arg):
     return self.f.rtrim(arg, _whitespace(self))
+
+
+_oracle_whitespace_rstrip = _whitespace_rstrip_chars
 
 
 def _spark_whitespace_rstrip(self, op, *, arg):
@@ -317,3 +324,217 @@ for _compiler in (ImpalaCompiler, PySparkCompiler, DatabricksCompiler):
     _method(_compiler, "Strftime", _spark_strftime)
     _method(_compiler, "RandomScalar", lambda self, op, **kw: self.f.rand())
     _method(_compiler, "RStrip", _spark_whitespace_rstrip)
+
+# --- Postgres ---------------------------------------------------------------------------------
+
+
+def _decimal_to_char_format(dtype) -> str:
+    precision = dtype.precision or 38
+    return "FM" + ("9" * (precision - dtype.scale - 1)) + "0." + ("9" * dtype.scale)
+
+
+def _postgres_cast(self, op, original, *, arg, to):
+    from_ = op.arg.dtype
+    if from_.is_decimal() and to.is_string():
+        if from_.scale is None:
+            # trim_scale() is only available in PostgreSQL 13+ but solves a lot of problems
+            # when trying to get consistently formatted numerics.
+            return self.cast(self.f.trim_scale(arg), dt.string)
+        if from_.scale > 0:
+            # Postgres writes the full scale (100.00); to_char without it, and rtrim(".") for
+            # a whole number's trailing "."
+            return self.f.rtrim(self.f.to_char(arg, _decimal_to_char_format(from_)), ".")
+    if from_.is_binary() and to.is_string():
+        return self.f.encode(arg, sge.convert("hex"))
+    if from_.is_string() and to.is_binary():
+        return self.f.decode(arg, sge.convert("hex"))
+    return original()
+
+
+def _postgres_hex_digest(self, op, *, arg, how):
+    if how not in ("md5", "sha256", "sha512"):
+        raise NotImplementedError(f"No available hashing function for {how}")
+    if how == "md5":
+        return self.f.md5(arg)
+    return self.f.encode(
+        self.f[how](self.f.convert_to(arg, sge.convert("UTF8"))), sge.convert("hex"))
+
+
+def _postgres_epoch_seconds(self, op, *, arg):
+    # whole seconds, and as BIGINT for large values, as on the other engines
+    return self.cast(
+        self.f.extract(sge.Var(this="epoch"), self.f.date_trunc(sge.convert("second"), arg)),
+        dt.int64)
+
+
+def _postgres_padded_char_length(self, op, *, arg):
+    # concat '' keeps a bpchar's trailing spaces, which its implicit varchar cast would drop;
+    # Postgres's concat reads NULL as '', so a NULL stays NULL first
+    return self.f.char_length(
+        self.if_(arg.is_(NULL), NULL, self.f.concat(arg, sge.convert(""))))
+
+
+_wrap(PostgresCompiler, "Cast", _postgres_cast)
+_method(PostgresCompiler, "HexDigest", _postgres_hex_digest)
+_method(PostgresCompiler, "ExtractEpochSeconds", _postgres_epoch_seconds)
+_method(PostgresCompiler, "PaddedCharLength", _postgres_padded_char_length)
+
+# --- MySQL ------------------------------------------------------------------------------------
+
+
+def _mysql_cast(self, op, original, *, arg, to):
+    from_ = op.arg.dtype
+    if from_.is_decimal() and from_.scale and from_.scale > 0 and to.is_string():
+        # MySQL writes the full scale (100.00); + 0 drops it (https://stackoverflow.com/a/20111398)
+        return original() + 0
+    if from_.is_binary() and to.is_string():
+        return self.f.lower(self.f.hex(arg))
+    if from_.is_string() and to.is_binary():
+        return self.f.unhex(arg)
+    return original()
+
+
+def _mysql_hex_digest(self, op, *, arg, how):
+    if how == "md5":
+        return self.f.md5(arg)
+    if how in ("sha256", "sha512"):
+        return self.f.sha2(arg, sge.convert(how[-3:]))
+    raise NotImplementedError(f"No available hashing function for {how}")
+
+
+def _mysql_strftime(self, op, original, *, arg, format_str):
+    if op.arg.dtype.is_timestamp():
+        return self.f.date_format(arg, sge.convert("%Y-%m-%d %H:%i:%S"))
+    return original()
+
+
+_wrap(MySQLCompiler, "Cast", _mysql_cast)
+_method(MySQLCompiler, "HexDigest", _mysql_hex_digest)
+_wrap(MySQLCompiler, "Strftime", _mysql_strftime)
+
+# --- SQL Server -------------------------------------------------------------------------------
+
+_MSSQL_CONVERT_STYLES = {
+    "%Y-%m-%d": 23,  # ISO8601
+    "%Y-%m-%d %H:%M:%S": 20,  # ODBC canonical
+    "%Y-%m-%d %H:%M:%S.%f": 21,  # ODBC canonical (with milliseconds)
+}
+
+
+def _mssql_type(name: str):
+    return sge.DataType.build(name, dialect="tsql")
+
+
+def _mssql_cast(self, op, original, *, arg, to):
+    from_ = op.arg.dtype
+    if from_.is_floating() and to.is_string():
+        return self.f.format(arg, sge.convert("G"))  # never scientific notation
+    if from_.is_binary() and to.is_string():
+        return self.f.lower(self.f.convert(_mssql_type("VARCHAR(MAX)"), arg, sge.convert(2)))
+    if from_.is_string() and to.is_binary():
+        return self.f.convert(_mssql_type("VARBINARY(MAX)"), arg, sge.convert(2))
+    if from_.is_decimal() and from_.scale and from_.scale > 0 and to.is_string():
+        return self.f.format(arg, sge.convert("0." + "#" * from_.scale))
+    if from_.is_boolean() and to.is_string():
+        return self.if_(arg.eq(0), sge.convert("false"), self.if_(arg.eq(1), sge.convert("true"),
+                                                                   NULL))
+    return original()
+
+
+def _mssql_hex_digest(self, op, *, arg, how):
+    if how != "sha256":
+        raise NotImplementedError(f"No available hashing function for {how}")
+    hashed = self.f.hashbytes(sge.convert("SHA2_256"),
+                              self.f.convert(_mssql_type("VARCHAR(MAX)"), arg))
+    return self.f.lower(self.f.convert(_mssql_type("CHAR(64)"), hashed, sge.convert(2)))
+
+
+def _mssql_strftime(self, op, *, arg, format_str):
+    fmt = op.format_str.value
+    if fmt not in _MSSQL_CONVERT_STYLES:
+        raise NotImplementedError(f"strftime format {fmt} not supported for SQL Server.")
+    if getattr(op.arg.dtype, "timezone", None):
+        # comparisons are zone-less: a DATETIME
+        arg = self.cast(arg, dt.Timestamp())
+    return self.f.convert(_mssql_type("VARCHAR"), arg, sge.convert(_MSSQL_CONVERT_STYLES[fmt]))
+
+
+def _mssql_epoch_seconds(self, op, *, arg):
+    return self.cast(
+        self.f.datediff_big(sge.Var(this="s"), sge.convert("1970-01-01 00:00:00"), arg),
+        dt.int64)
+
+
+def _mssql_string_length(self, op, *, arg):
+    # characters, not bytes; LEN() ignores trailing spaces, so they become underscores first
+    return self.cast(self.f.len(self.f.replace(arg, sge.convert(" "), sge.convert("_"))),
+                     dt.int64)
+
+
+def _mssql_binary_length(self, op, *, arg):
+    return self.cast(self.f.datalength(arg), dt.int64)
+
+
+def _mssql_rstrip(self, op, *, arg):
+    return self.f.rtrim(self.cast(arg, dt.String()))
+
+
+def _mssql_string_join(self, op, original, **kw):
+    # SQL Server's CONCAT refuses a single argument (issue-1202)
+    if len(op.arg) == 1:
+        return kw["arg"][0]
+    return original()
+
+
+def _mssql_sum(self, op, original, **kw):
+    # an integer sum as BIGINT, against INT overflow (error 8115)
+    if op.arg.dtype.is_integer():
+        return self.agg.sum(self.cast(kw["arg"], dt.int64), where=kw.get("where"))
+    return original()
+
+
+def _mssql_mean(self, op, original, **kw):
+    # an integer mean as FLOAT, against integer truncation
+    if op.arg.dtype.is_integer():
+        return self.agg.avg(self.cast(kw["arg"], dt.float64), where=kw.get("where"))
+    return original()
+
+
+_wrap(MSSQLCompiler, "Cast", _mssql_cast)
+_method(MSSQLCompiler, "HexDigest", _mssql_hex_digest)
+_method(MSSQLCompiler, "Strftime", _mssql_strftime)
+_method(MSSQLCompiler, "ExtractEpochSeconds", _mssql_epoch_seconds)
+_method(MSSQLCompiler, "StringLength", _mssql_string_length)
+_method(MSSQLCompiler, "PaddedCharLength", _mssql_string_length)
+_method(MSSQLCompiler, "BinaryLength", _mssql_binary_length)
+_method(MSSQLCompiler, "RStrip", _mssql_rstrip)
+_method(MSSQLCompiler, "RandomScalar", lambda self, op, **kw: self.f.newid())
+_wrap(MSSQLCompiler, "StringJoin", _mssql_string_join)
+_wrap(MSSQLCompiler, "Sum", _mssql_sum)
+_wrap(MSSQLCompiler, "Mean", _mssql_mean)
+
+# --- Snowflake --------------------------------------------------------------------------------
+
+
+def _snowflake_cast(self, op, original, *, arg, to):
+    from_ = op.arg.dtype
+    if from_.is_decimal() and from_.scale and from_.scale > 0 and to.is_string():
+        return self.f.rtrim(self.f.to_char(arg, _decimal_to_char_format(from_)), ".")
+    if from_.is_binary() and to.is_string():
+        return self.f.hex_encode(arg, 0)
+    if from_.is_string() and to.is_binary():
+        return self.f.hex_decode_binary(arg)
+    return original()
+
+
+def _snowflake_hex_digest(self, op, *, arg, how):
+    if how != "sha256":
+        raise NotImplementedError(f"No available hashing function for {how}")
+    return self.f.sha2(arg)
+
+
+_wrap(SnowflakeCompiler, "Cast", _snowflake_cast)
+_method(SnowflakeCompiler, "HexDigest", _snowflake_hex_digest)
+_method(SnowflakeCompiler, "ExtractEpochSeconds",
+        lambda self, op, *, arg: self.f.date_part(sge.Var(this="epoch_seconds"), arg))
+_method(SnowflakeCompiler, "RStrip", _whitespace_rstrip_chars)

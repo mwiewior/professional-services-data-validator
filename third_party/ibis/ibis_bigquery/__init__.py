@@ -11,150 +11,46 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""DVT's BigQuery backend: ibis 12's, plus REST-only reads for a local BigQuery emulator."""
 
-from typing import TYPE_CHECKING
+from ibis.backends.bigquery import Backend as BigQueryBackend
 
-import google.auth.credentials
-import google.cloud.bigquery as bq
-import pydata_google_auth
-from pydata_google_auth import cache
 
-from ibis.backends.bigquery import (
-    Backend as BigQueryBackend,
-    _create_client_info,
-    CLIENT_ID,
-    CLIENT_SECRET,
-    EXTERNAL_DATA_SCOPES,
-    SCOPES,
-)
-from ibis.backends.bigquery.client import parse_project_and_dataset
-import third_party.ibis.ibis_bigquery.datatypes  # noqa: F401
+class _RestOnly:
+    """A query's result read through the REST API only: a local emulator's Storage API can't
+    serve anonymous query-result tables, and Google's client creates a Storage client by itself
+    unless told not to (`create_bqstorage_client=False`)."""
 
-if TYPE_CHECKING:
-    import google.cloud.bigquery_storage_v1
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __getattr__(self, name):
+        return getattr(self._rows, name)
+
+    def to_arrow(self, *args, **kwargs):
+        return self._rows.to_arrow(
+            *args, **{**kwargs, "bqstorage_client": None, "create_bqstorage_client": False}
+        )
+
+    def to_arrow_iterable(self, *args, **kwargs):
+        return self._rows.to_arrow_iterable(*args, **{**kwargs, "bqstorage_client": None})
+
+    def to_dataframe(self, *args, **kwargs):
+        return self._rows.to_dataframe(
+            *args, **{**kwargs, "bqstorage_client": None, "create_bqstorage_client": False}
+        )
 
 
 class Backend(BigQueryBackend):
-    def __init__(self):
-        super().__init__()
-        self.storage_client = None
-
-    def do_connect(
-        self,
-        project_id: str = None,
-        dataset_id: str = "",
-        credentials: google.auth.credentials.Credentials = None,
-        application_name: str = None,
-        auth_local_webserver: bool = True,
-        auth_external_data: bool = False,
-        auth_cache: str = "default",
-        partition_column: str = "PARTITIONTIME",
-        # Custom DVT arguments:
-        client: bq.Client = None,
-        storage_client: "google.cloud.bigquery_storage_v1.BigQueryReadClient" = None,
-        location: str = None,
-        storage_api_disabled: bool = False,
-    ):
-        """Copy of Ibis v5 BigQuery do_connect() customized for DVT, see original method for docs."""
-        # Read query results through the REST API only, never creating a Storage API client -
-        # a local BigQuery emulator's Storage API cannot serve anonymous query-result tables.
+    def do_connect(self, *args, storage_api_disabled: bool = False, **kwargs):
+        super().do_connect(*args, **kwargs)
         self.storage_api_disabled = storage_api_disabled
-        client_project_id = client.project if client is not None else None
-        default_project_id = None
+        if storage_api_disabled:
+            self.storage_client = None
 
-        if client is None and credentials is None:
-            scopes = SCOPES
-            if auth_external_data:
-                scopes = EXTERNAL_DATA_SCOPES
-
-            if auth_cache == "default":
-                credentials_cache = cache.ReadWriteCredentialsCache(
-                    filename="ibis.json"
-                )
-            elif auth_cache == "reauth":
-                credentials_cache = cache.WriteOnlyCredentialsCache(
-                    filename="ibis.json"
-                )
-            elif auth_cache == "none":
-                credentials_cache = cache.NOOP
-            else:
-                raise ValueError(
-                    f"Got unexpected value for auth_cache = '{auth_cache}'. "
-                    "Expected one of 'default', 'reauth', or 'none'."
-                )
-
-            credentials, default_project_id = pydata_google_auth.default(
-                scopes,
-                client_id=CLIENT_ID,
-                client_secret=CLIENT_SECRET,
-                credentials_cache=credentials_cache,
-                use_local_webserver=auth_local_webserver,
-            )
-            project_id = project_id or default_project_id
-
-        self.billing_project = client_project_id or project_id
-        self.data_project = project_id or self.billing_project
-        self.dataset = None
-
-        if client is not None:
-            self.client = client
-        else:
-            self.client = bq.Client(
-                project=self.billing_project,
-                credentials=credentials,
-                client_info=_create_client_info(application_name),
-                location=location,
-            )
-
-        self.client.default_query_job_config = bq.QueryJobConfig(
-            use_legacy_sql=False, allow_large_results=True
-        )
-
-        self.partition_column = partition_column
-        self.storage_client = storage_client
-
-    def _cursor_to_arrow(
-        self,
-        cursor,
-        *,
-        method=None,
-        chunk_size: int = None,
-    ):
-        """Copy of Ibis v5 BigQuery _cursor_to_arrow() except can use custom DVT storage client"""
-        if method is None:
-
-            def method(result, storage_client=self.storage_client):
-                return result.to_arrow(
-                    progress_bar_type=None,
-                    # Include DVT specific storage client.
-                    bqstorage_client=storage_client,
-                    create_bqstorage_client=bool(
-                        not self.storage_client
-                        and not getattr(self, "storage_api_disabled", False)
-                    ),
-                )
-
-        query = cursor.query
-        query_result = query.result(page_size=chunk_size)
-        # workaround potentially not having the ability to create read sessions
-        # in the dataset project
-        orig_project = query_result._project
-        query_result._project = self.billing_project
-        try:
-            arrow_obj = method(query_result)
-        finally:
-            query_result._project = orig_project
-        return arrow_obj
-
-    def _parse_project_and_dataset(self, dataset) -> tuple[str, str]:
-        """Copied from Ibis code and modified to use self.data_project."""
-        if not dataset and not self.dataset:
-            raise ValueError("Unable to determine BigQuery dataset.")
-        project, _, dataset = parse_project_and_dataset(
-            self.data_project,
-            dataset or f"{self.data_project}.{self.dataset}",
-        )
-        return project, dataset
+    def _to_query(self, *args, **kwargs):
+        rows = super()._to_query(*args, **kwargs)
+        return _RestOnly(rows) if self.storage_api_disabled else rows
 
     def list_primary_key_columns(self, database: str, table: str) -> list:
         """Return a list of primary key column names."""

@@ -11,35 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""DVT's Oracle backend: ibis 12's, with DVT's own reading of Oracle's types (a DATE is a date,
+a NUMBER a decimal of its own precision), its session settings and its Oracle-only methods."""
 
-import re
-from typing import Iterable, Literal, Optional, Tuple, Dict, Any
-
-import sqlalchemy as sa
-from sqlalchemy.dialects.oracle.base import (
-    OracleIdentifierPreparer,
-    RESERVED_WORDS as ORACLE_RESERVED_WORDS,
-)
-from sqlalchemy.dialects.oracle.oracledb import OracleDialect_oracledb
+from functools import partial
+from typing import Iterable, Optional, Tuple, TypedDict
 
 import ibis.expr.datatypes as dt
-from ibis.backends.base.sql.alchemy import BaseAlchemyBackend
-from third_party.ibis.ibis_addon.api import dvt_handle_failed_column_type_inference
-from third_party.ibis.ibis_oracle.compiler import OracleCompiler
-from third_party.ibis.ibis_oracle.datatypes import _get_type
+import ibis.expr.schema as sch
 import oracledb
+from ibis.backends.oracle import Backend as OracleBackend
 
-EXTRA_RESERVED_WORDS = set(
-    [
-        "COLUMN",
-        "ROWID",
-    ]
-)
-
-
-# We use a hardcoded list instead of checking the `oracle_maintained` column
-# in `all_users` because we want more granular control over which schemas to ignore.
-# For example, some customers use SYSTEM and DBSNMP for their own monitoring tables.
 ORACLE_SYSTEM_SCHEMAS = {
     "ANONYMOUS",
     "APPQOSSYS",
@@ -86,159 +68,92 @@ ORACLE_SYSTEM_SCHEMAS = {
 }
 
 
-def _ora_denormalize_name(self, name):
-    """Oracle specific version of sqlalchemy/engine/default.py.denormalize_name()
+class _FieldDescription(TypedDict):
+    """Type of result of oracledb.Cursor.description."""
 
-    The original function upper cases most identifiers unless they require quoting
-    before use in SQL. This includes when non standard characters are in play.
-
-    This prevents dictionary queries from succeeding. Really, the presence of special
-    characters should be irrelevant to upper/lower case decisions.
-
-    This method uppercases identifiers that include special characters, otherwise it
-    follows the original code path.
-    """
-    if name is None:
-        return None
-
-    if self.identifier_preparer._requires_quotes_illegal_chars(name):
-        name = name.upper()
-    return super(OracleDialect_oracledb, self).denormalize_name(name)
+    name: Optional[str]
+    data_type: Optional[str]
+    display_size: Optional[int]
+    internal_size: Optional[int]
+    precision: Optional[int]
+    scale: Optional[int]
+    null_ok: Optional[int]
 
 
-OracleDialect_oracledb.denormalize_name = _ora_denormalize_name
+def _get_type(col: _FieldDescription) -> dt.DataType:
+    typename = col[1]
+    typ = _type_mapping.get(typename)
+    if typ is None:
+        raise NotImplementedError(f"Oracle type {typename} is not supported")
 
-
-class DVTOracleIdentifierPreparer(OracleIdentifierPreparer):
-
-    reserved_words = {
-        x.lower() for x in ORACLE_RESERVED_WORDS.union(EXTRA_RESERVED_WORDS)
-    }
-
-    def quote_identifier(self, value):
-        """Quote an identifier.
-
-        This method adds extra path of upper casing the identifier if it is being quoted
-        due to special characters. Otherwise we follow the original path.
-
-        This is because all names are normalised to lower case in DVT which is fine because
-        unquoted table name are upper cased automatically by Oracle. If we add quotes due to
-        special characters then we lose the auto uppercase operation. This method forces it.
-        """
-        if self._requires_quotes_illegal_chars(value):
-            return super().quote_identifier(value.upper())
+    if typename == oracledb.DB_TYPE_NUMBER:
+        if col[5] == -127:
+            # This will occur if type is NUMBER with no precision/scale or if type is FLOAT.
+            typ = partial(typ)
         else:
-            return super().quote_identifier(value)
+            typ = partial(typ, precision=col[4], scale=col[5])
+
+    return typ(nullable=bool(col[6]))
 
 
-OracleDialect_oracledb.preparer = DVTOracleIdentifierPreparer
+_type_mapping = {
+    oracledb.DB_TYPE_VARCHAR: dt.String,
+    oracledb.DB_TYPE_NVARCHAR: dt.String,
+    oracledb.DB_TYPE_CHAR: dt.String,
+    oracledb.DB_TYPE_NCHAR: dt.String,
+    oracledb.DB_TYPE_DATE: dt.Date,
+    oracledb.DB_TYPE_TIMESTAMP: dt.Timestamp,
+    oracledb.DB_TYPE_TIMESTAMP_TZ: dt.Timestamp(timezone="UTC"),
+    oracledb.DB_TYPE_TIMESTAMP_LTZ: dt.Timestamp(timezone="UTC"),
+    oracledb.DB_TYPE_RAW: dt.Binary,
+    oracledb.DB_TYPE_LONG_RAW: dt.Binary,
+    oracledb.DB_TYPE_BFILE: dt.Binary,
+    oracledb.DB_TYPE_NUMBER: dt.Decimal,
+    oracledb.DB_TYPE_LONG: dt.String,
+    oracledb.DB_TYPE_NCLOB: dt.String,
+    oracledb.DB_TYPE_CLOB: dt.String,
+    oracledb.DB_TYPE_BLOB: dt.Binary,
+    oracledb.DB_TYPE_BINARY_FLOAT: dt.Float32,
+    oracledb.DB_TYPE_BINARY_DOUBLE: dt.Float64,
+    oracledb.DB_TYPE_INTERVAL_DS: partial(dt.Interval, unit="s"),
+    oracledb.DB_TYPE_INTERVAL_YM: partial(dt.Interval, unit="s"),
+    oracledb.DB_TYPE_BOOLEAN: dt.Boolean,
+}
 
 
-class Backend(BaseAlchemyBackend):
-    name = "oracle"
-    compiler = OracleCompiler
-
+class Backend(OracleBackend):
     def __init__(self, arraysize: int = 500):
         super().__init__()
         self.arraysize = arraysize
 
-    def do_connect(
-        self,
-        host: str = "localhost",
-        user: Optional[str] = None,
-        password: Optional[str] = None,
-        port: int = 1521,
-        database: Optional[str] = None,
-        protocol: str = "TCP",
-        thick_mode: bool = False,
-        driver: Literal["oracledb"] = "oracledb",
-        connect_args: Dict[str, Any] = None,
-        url: Optional[str] = None,
-    ) -> None:
-        if driver != "oracledb":
-            raise NotImplementedError("oracledb is currently the only supported driver")
-        if url is None:
-            if thick_mode or not user:
-                # Configuration explicitly requests thick_mode or user not specified, credentials in wallet - requires thick_mode
-                oracledb.init_oracle_client(
-                    config_dir=connect_args.get("config_dir", None)
-                )
-            connect_args = {} if not connect_args else connect_args
-            if user:
-                connect_args.update(
-                    {
-                        "host": host,
-                        "user": user,
-                        "password": password,
-                        "port": port,
-                        "service_name": database,
-                        "protocol": protocol,
-                    }
-                )
-            sa_url = "oracle+oracledb://@"
-        else:
-            connect_args = {} if not connect_args else connect_args
-            if thick_mode:
-                # Configuration explicitly requests thick_mode.
-                oracledb.init_oracle_client(
-                    config_dir=connect_args.get("config_dir", None)
-                )
-            sa_url = sa.engine.url.make_url(url)
+    def _post_connect(self) -> None:
+        super()._post_connect()
+        self.con.module = "DVT"  # identifies the session in Oracle
+        with self.con.cursor() as cur:
+            cur.execute("ALTER SESSION SET TIME_ZONE='UTC'")
+            # Standardise numeric formatting on en_US (issue 1033).
+            cur.execute("ALTER SESSION SET NLS_NUMERIC_CHARACTERS='.,'")
+        with self.con.cursor() as cur:
+            cur.execute("select sys_context('USERENV', 'SERVICE_NAME') from dual")
+            self.database_name = cur.fetchall()[0][0]
 
-        engine = sa.create_engine(
-            sa_url,
-            poolclass=sa.pool.StaticPool,
-            arraysize=self.arraysize,
-            # The hardcoding of 128 below is not great but is the simplest way of dealing with:
-            #   https://github.com/GoogleCloudPlatform/professional-services-data-validator/issues/1250
-            # There is a quirk of SQLAlchemy behaviour that is discussed in comments of issue 1250 that
-            # we cannot easily deal with, even if we "fixed" it it could be months or years before we can
-            # take advantage of it.
-            # We manage the max length of identifiers generated by DVT in clients.get_max_column_length()
-            # and in all other cases re-use existing column names (i.e. we know the length is already fine).
-            # Therefore the ugly hardcoding of 128 kicks the can down the road and unblocks a customer
-            # who is working with Oracle 11g and a max identifier length of 30.
-            max_identifier_length=128,
-            # Pessimistic disconnect handling.
-            pool_pre_ping=True,
-            # oracledb connection arguments.
-            connect_args=connect_args,
-        )
-        try:
-            # Identify the session in Oracle as DVT, no-op if this fails.
-            engine.raw_connection().driver_connection.module = "DVT"
-        except Exception:
-            pass
+    def _metadata(self, source: str) -> Iterable[Tuple[str, dt.DataType]]:
+        """The types of `source` (a table reference or a query) as DVT reads them, from the
+        cursor of its first row."""
+        with self.con.cursor() as cur:
+            cur.arraysize = self.arraysize
+            cur.execute(f"SELECT * FROM {source} t0 WHERE ROWNUM <= 1")
+            return [(column[0], _get_type(column)) for column in cur.description]
 
-        @sa.event.listens_for(engine, "connect")
-        def connect(dbapi_connection, connection_record):
-            with dbapi_connection.cursor() as cur:
-                cur.execute("ALTER SESSION SET TIME_ZONE='UTC'")
-                # Standardise numeric formatting on en_US (issue 1033).
-                cur.execute("ALTER SESSION SET NLS_NUMERIC_CHARACTERS='.,'")
+    def get_schema(self, name: str, *, catalog: Optional[str] = None,
+                   database: Optional[str] = None) -> sch.Schema:
+        database = database or self.current_database
+        tables = self.list_tables(database=database)
+        table = next((t for t in tables if t.lower() == name.lower()), name.upper())
+        return sch.Schema(dict(self._metadata(f'"{database}"."{table}"')))
 
-        super().do_connect(engine)
-        # the database / service name is usually obtained from tnsnames.ora, we fetch it here
-        self.database_name = self.raw_sql(
-            "select sys_context('USERENV', 'SERVICE_NAME') from dual"
-        ).fetchall()[0][0]
-
-    def _handle_failed_column_type_inference(
-        self, table: sa.Table, nulltype_cols: Iterable[str]
-    ) -> sa.Table:
-        return dvt_handle_failed_column_type_inference(self, table, nulltype_cols)
-
-    def _metadata(self, query) -> Iterable[Tuple[str, dt.DataType]]:
-        if (
-            re.search(r"^\s*SELECT\s", query, flags=re.MULTILINE | re.IGNORECASE)
-            is not None
-        ):
-            query = f"({query})"
-
-        with self.begin() as con:
-            result = con.exec_driver_sql(f"SELECT * FROM {query} t0 WHERE ROWNUM <= 1")
-            cursor = result.cursor
-            yield from ((column[0], _get_type(column)) for column in cursor.description)
+    def _get_schema_using_query(self, query: str) -> sch.Schema:
+        return sch.Schema(dict(self._metadata(f"({query})")))
 
     def list_primary_key_columns(self, database: str, table: str) -> list:
         """Return a list of primary key column names."""
@@ -251,30 +166,18 @@ class Backend(BaseAlchemyBackend):
             AND c.constraint_type = 'P'
             ORDER BY cc.position
         """
-        with self.begin() as con:
-            result = con.exec_driver_sql(
-                list_pk_col_sql, parameters=(database.upper(), table.upper())
-            )
-            return [_[0] for _ in result.cursor.fetchall()]
+        with self.con.cursor() as cur:
+            cur.execute(list_pk_col_sql, (database.upper(), table.upper()))
+            return [_[0] for _ in cur.fetchall()]
 
     def raw_column_metadata(
         self, database: str = None, table: str = None, query: str = None
     ) -> Iterable[Tuple]:
-        """Define this method to allow DVT to test if backend specific transformations may be needed for comparison.
-        Partner method to _metadata that retains raw data type information instead of converting to Ibis types.
-        This works in the same way as _metadata by running a query over the DVT source, either schema.table or a
-        custom query, and fetching the first row. From the cursor we can detect data types of the row's columns.
-
-        Returns:
-            list: A list of tuples containing the standard 7 DB API fields:
-                  https://peps.python.org/pep-0249/#description
-        """
+        """The standard 7 DB API description fields of each column of `database`.`table` or of
+        `query`, with Oracle's own type names: DVT tests them for backend specific transforms."""
 
         def strip_prefix(s: str):
-            if s.startswith("DB_TYPE_"):
-                return s[8:]
-            else:
-                return s
+            return s[8:] if s.startswith("DB_TYPE_") else s
 
         assert (database and table) or query, "We should never receive all args=None"
         if database and table:
@@ -282,44 +185,30 @@ class Backend(BaseAlchemyBackend):
             matched_table = next(
                 (t for t in db_tables if t.lower() == table.lower()), table.upper()
             )
-            dialect = self.con.dialect
-            preparer = dialect.identifier_preparer
-            source = f"{preparer.quote(database)}.{preparer.quote(matched_table)}"
-        elif query:
+            source = f'"{database}"."{matched_table}"'
+        else:
             source = f"({query})"
-
-        with self.begin() as con:
-            result = con.exec_driver_sql(f"SELECT * FROM {source} t0 WHERE ROWNUM <= 1")
-            cursor = result.cursor
-            yield from (
+        with self.con.cursor() as cur:
+            cur.execute(f"SELECT * FROM {source} t0 WHERE ROWNUM <= 1")
+            return [
                 (column[0], strip_prefix(column[1].name), *column[2:])
-                for column in cursor.description
-            )
+                for column in cur.description
+            ]
 
     def is_char_type_padded(self, char_type: Tuple) -> bool:
-        """Define this method if the backend supports character/string types that are padded and returns
-        padded values, which DVT may want to trim"""
+        """Whether a character type is padded and returns padded values, which DVT may trim."""
         return char_type[0] in ["CHAR", "NCHAR"]
 
-    def list_databases(self, like: Optional[str] = None) -> list[str]:
-        """Return a list of user schemas in the Oracle database.
+    def list_databases(self, like: Optional[str] = None, **kwargs) -> list[str]:
+        """User schemas, without Oracle-maintained system schemas (slow and often not readable)."""
+        with self.con.cursor() as cur:
+            cur.execute("SELECT username FROM all_users")
+            schemas = [row[0] for row in cur.fetchall()]
+        return self._filter_with_like(
+            [s for s in schemas if s.upper() not in ORACLE_SYSTEM_SCHEMAS], like)
 
-        Excludes Oracle-maintained system schemas to avoid performance bottlenecks
-        and permission errors during table discovery.
-
-        Args:
-            like: Optional pattern string to filter returned schema names.
-
-        Returns:
-            list[str]: Filtered list of schema names.
-        """
-        all_schemas = sa.inspect(self.con).get_schema_names()
-        schemas = [
-            schema
-            for schema in all_schemas
-            if schema.upper() not in ORACLE_SYSTEM_SCHEMAS
-        ]
-        return self._filter_with_like(schemas, like)
+    def dvt_list_tables(self, like=None, database=None):
+        return self.list_tables(like=like, database=database)
 
     def dvt_tuple_in_supported(self) -> bool:
         """Return True if backend client supports native SQL tuple/struct IN expressions."""

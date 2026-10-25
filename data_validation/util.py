@@ -76,22 +76,10 @@ def ibis_table_to_sql(ibis_table: "IbisTable", alchemy_client: "BaseBackend") ->
 
     We need the client in order to find the dialect, otherwise we end up with generic literals.
     """
-    # Import clients here because it is a heavy weight import for a utility module
-    # and we want to avoid circular imports since clients also (eventually) imports utils.
-    from data_validation import clients
-
-    # If the backend uses sqlalchemy, we will need to request sqla to bind variables
-    # for a non sqlalchemy backend, the parameters are already bound
-    if alchemy_client and clients.is_sqlalchemy_backend(alchemy_client):
-        dialect = alchemy_client.con.dialect
-        sql_string = str(
-            ibis_table.compile().compile(
-                dialect=dialect, compile_kwargs={"literal_binds": True}
-            )
-        )
-    else:
-        sql_string = str(ibis_table.compile())
-    return sql_string
+    # ibis compiles to SQL text with its literals in it, in the client's own dialect
+    if alchemy_client is not None:
+        return str(alchemy_client.compile(ibis_table))
+    return str(ibis_table.compile())
 
 
 def dvt_temp_object_name(prefix: str = "dvt_temp") -> str:

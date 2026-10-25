@@ -30,9 +30,8 @@ from data_validation import client_info, consts, exceptions
 from data_validation.secret_manager import SecretManagerBuilder
 
 from third_party.ibis.ibis_bigquery.api import bigquery_connect
-from third_party.ibis.ibis_cloud_spanner.api import spanner_connect
+from third_party.ibis.ibis_databricks import databricks_connect
 from third_party.ibis.ibis_impala.api import impala_connect
-from third_party.ibis.ibis_redshift.api import redshift_connect
 
 if TYPE_CHECKING:
     import ibis.expr.schema as sch
@@ -48,16 +47,14 @@ warnings.filterwarnings(
 )
 
 
+# The engines whose ibis backend keeps one DB-API connection that reconnects by itself, which DVT
+# reuses across validations (it opens a new client for every validation on the others)
 IBIS_ALCHEMY_BACKENDS = [
     "mysql",
     "oracle",
     "postgres",
-    "db2",
-    "db2_zos",
     "mssql",
-    "redshift",
     "snowflake",
-    "sybase",
 ]
 
 
@@ -76,12 +73,13 @@ def _raise_missing_client_error(msg):
     return get_client_call
 
 
-# Teradata requires teradatasql and licensing
-try:
-    from third_party.ibis.ibis_teradata.api import teradata_connect
-except ImportError:
-    msg = "pip install teradatasql (requires Teradata licensing)"
-    teradata_connect = _raise_missing_client_error(msg)
+# Teradata and Redshift have no ibis 12 backend yet: the fork's issues #426 and #425
+teradata_connect = _raise_missing_client_error(
+    "Teradata is not supported on ibis 12 yet (getindata/axis#426)"
+)
+redshift_connect = _raise_missing_client_error(
+    "Redshift is not supported on ibis 12 yet (getindata/axis#425)"
+)
 
 # Oracle requires oracledb driver
 try:
@@ -95,20 +93,6 @@ except ImportError:
     snowflake_connect = _raise_missing_client_error(
         "pip install snowflake-connector-python && pip install snowflake-sqlalchemy"
     )
-
-# DB2 requires ibm_db_sa
-try:
-    from third_party.ibis.ibis_db2.api import db2_connect
-    from third_party.ibis.ibis_db2_zos.api import db2_zos_connect
-except ImportError:
-    db2_connect = _raise_missing_client_error("pip install ibm_db_sa")
-    db2_zos_connect = _raise_missing_client_error("pip install ibm_db_sa")
-
-# Sybase requires sqlalchemy_sybase package.
-try:
-    from third_party.ibis.ibis_sybase.api import sybase_connect
-except ImportError:
-    sybase_connect = _raise_missing_client_error("pip install sqlalchemy_sybase")
 
 
 # MSSQL requires pyodbc package.
@@ -245,9 +229,10 @@ def get_pandas_client(table_name, file_path, file_type):
     else:
         raise ValueError(f"Unknown Pandas File Type: {file_type}")
 
-    pandas_client = ibis.pandas.connect({table_name: df})
-
-    return pandas_client
+    # ibis 10 removed its pandas backend: the file's rows go into an in-memory DuckDB
+    client = ibis.duckdb.connect()
+    client.create_table(table_name, df)
+    return client
 
 
 def is_sqlalchemy_backend(client):
@@ -293,26 +278,19 @@ def get_ibis_table(client, schema_name, table_name, database_name=None):
         database_name, schema_name = _split_bigquery_table_location(
             schema_name, database_name
         )
-        return client.table(table_name, database=database_name, schema=schema_name)
+        return client.table(table_name, database=(database_name, schema_name)
+                            if database_name else schema_name)
     elif client.name == "snowflake":
         database_name, schema_name = _split_snowflake_table_location(
             schema_name, database_name
         )
-        return client.table(table_name, database=database_name, schema=schema_name)
-    elif client.name == "spanner":
+        return client.table(table_name, database=(database_name, schema_name)
+                            if database_name else schema_name)
+    elif client.name in ["oracle", "postgres", "mssql"]:
+        return client.table(table_name, database=(database_name, schema_name)
+                            if database_name else schema_name)
+    elif client.name == "duckdb":
         return client.table(table_name)
-    elif client.name in [
-        "oracle",
-        "postgres",
-        "db2",
-        "db2_zos",
-        "mssql",
-        "redshift",
-        "sybase",
-    ]:
-        return client.table(table_name, database=database_name, schema=schema_name)
-    elif client.name == "pandas":
-        return client.table(table_name, schema=schema_name)
     else:
         return client.table(table_name, database=schema_name)
 
@@ -338,30 +316,20 @@ def get_ibis_table_schema(
         database_name, schema_name = _split_bigquery_table_location(
             schema_name, database_name
         )
-        return client.get_schema(table_name, schema=schema_name, database=database_name)
+        return client.get_schema(table_name, catalog=database_name, database=schema_name)
     elif client.name == "snowflake":
         database_name, schema_name = _split_snowflake_table_location(
             schema_name, database_name
         )
-        return client.table(
-            table_name, database=database_name, schema=schema_name
-        ).schema()
-    elif is_sqlalchemy_backend(client):
-        return client.table(table_name, schema=schema_name).schema()
-    elif client.name == "spanner":
-        return client.get_schema(table_name)
+        return client.get_schema(table_name, catalog=database_name, database=schema_name)
     else:
-        return client.get_schema(table_name, schema_name)
+        return client.get_schema(table_name, database=schema_name)
 
 
 def get_ibis_query_schema(client, query_str) -> "sch.Schema":
-    if is_sqlalchemy_backend(client):
-        ibis_query = get_ibis_query(client, query_str)
-        return ibis_query.schema()
-    else:
-        # NJ: I'm not happy about calling a private method but don't see how I can avoid it.
-        #     Ibis does not expose a public method like it does for get_schema().
-        return client._get_schema_using_query(query_str)
+    # NJ: I'm not happy about calling a private method but don't see how I can avoid it.
+    #     Ibis does not expose a public method like it does for get_schema().
+    return client._get_schema_using_query(query_str)
 
 
 def list_databases(client):
@@ -386,7 +354,7 @@ def list_tables(client, schema_name, tables_only=True):
         if tables_only and hasattr(client, "dvt_list_tables")
         else client.list_tables
     )
-    if client.name in ["redshift", "snowflake", "pandas"]:
+    if client.name in ["snowflake", "duckdb"]:
         return fn()
     return fn(database=schema_name)
 
@@ -522,17 +490,15 @@ def get_max_in_list_size(client, in_list_over_expressions=False):
 
 CLIENT_LOOKUP = {
     consts.SOURCE_TYPE_BIGQUERY: get_bigquery_client,
+    consts.SOURCE_TYPE_DATABRICKS: databricks_connect,
     consts.SOURCE_TYPE_IMPALA: impala_connect,
-    consts.SOURCE_TYPE_MYSQL: ibis.mysql.connect,
+    # an engine whose ibis extra isn't installed fails when connected, naming the extra
+    consts.SOURCE_TYPE_MYSQL: lambda **kwargs: ibis.mysql.connect(**kwargs),
     consts.SOURCE_TYPE_ORACLE: oracle_connect,
     consts.SOURCE_TYPE_FILESYSTEM: get_pandas_client,
-    consts.SOURCE_TYPE_POSTGRES: ibis.postgres.connect,
+    consts.SOURCE_TYPE_POSTGRES: lambda **kwargs: ibis.postgres.connect(**kwargs),
     consts.SOURCE_TYPE_REDSHIFT: redshift_connect,
     consts.SOURCE_TYPE_TERADATA: teradata_connect,
     consts.SOURCE_TYPE_MSSQL: mssql_connect,
     consts.SOURCE_TYPE_SNOWFLAKE: snowflake_connect,
-    consts.SOURCE_TYPE_SPANNER: spanner_connect,
-    consts.SOURCE_TYPE_SYBASE: sybase_connect,
-    consts.SOURCE_TYPE_DB2: db2_connect,
-    consts.SOURCE_TYPE_DB2_ZOS: db2_zos_connect,
 }

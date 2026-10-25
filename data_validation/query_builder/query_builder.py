@@ -435,8 +435,9 @@ class CalculatedField(object):
     def hash(config, fields):
         if config.get("default_hash_function") is None:
             how = "sha256"
+            # the hash's lower-case hex text (ibis 12's hashbytes returns bytes)
             return CalculatedField(
-                ibis.expr.types.StringValue.hashbytes,
+                ibis.expr.types.StringValue.hexdigest,
                 config,
                 fields,
                 how=how,

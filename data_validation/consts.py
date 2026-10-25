@@ -131,8 +131,7 @@ YAML_VALIDATIONS = "validations"
 
 # Connection key constants.
 SOURCE_TYPE_BIGQUERY = "BigQuery"
-SOURCE_TYPE_DB2 = "DB2"
-SOURCE_TYPE_DB2_ZOS = "DB2_ZOS"
+SOURCE_TYPE_DATABRICKS = "Databricks"
 SOURCE_TYPE_FILESYSTEM = "FileSystem"
 SOURCE_TYPE_IMPALA = "Impala"
 SOURCE_TYPE_MSSQL = "MSSQL"
@@ -141,8 +140,6 @@ SOURCE_TYPE_ORACLE = "Oracle"
 SOURCE_TYPE_POSTGRES = "Postgres"
 SOURCE_TYPE_REDSHIFT = "Redshift"
 SOURCE_TYPE_SNOWFLAKE = "Snowflake"
-SOURCE_TYPE_SPANNER = "Spanner"
-SOURCE_TYPE_SYBASE = "Sybase"
 SOURCE_TYPE_TERADATA = "Teradata"
 
 # BigQuery Result Handler Configs
@@ -282,4 +279,4 @@ CALC_FIELD_RSTRIP = "rstrip"
 CALC_FIELD_UPPER = "upper"
 
 # Backends that do not support window functions.
-NO_WINDOW_FUNCTION_SUPPORT = [SOURCE_TYPE_SYBASE]
+NO_WINDOW_FUNCTION_SUPPORT = []

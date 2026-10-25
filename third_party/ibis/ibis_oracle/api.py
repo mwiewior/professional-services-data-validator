@@ -31,18 +31,21 @@ def oracle_connect(
     connect_args: str = None,
     url: str = None,
 ):
+    if driver != "oracledb":
+        raise NotImplementedError("oracledb is currently the only supported driver")
     connect_args_dict = dvt_config_string_to_dict(connect_args) if connect_args else {}
+    if thick_mode or not (user or url):
+        # thick mode, or credentials in a wallet, which needs thick mode
+        oracledb.init_oracle_client(config_dir=connect_args_dict.get("config_dir"))
     backend = OracleBackend()
-    backend.do_connect(
-        host=host,
-        port=port,
-        user=user,
-        password=password,
-        database=database,
-        protocol=protocol,
-        thick_mode=thick_mode,
-        driver=driver,
-        connect_args=connect_args_dict,
-        url=url,
-    )
+    if url is not None:
+        backend.do_connect(user=user, password=password, dsn=url.split("@", 1)[-1])
+    else:
+        backend.do_connect(
+            user=user,
+            password=password,
+            dsn=oracledb.makedsn(host, port, service_name=database)
+            if protocol == "TCP"
+            else f"{protocol.lower()}://{host}:{port}/{database}",
+        )
     return backend
