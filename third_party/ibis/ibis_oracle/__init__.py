@@ -121,6 +121,11 @@ _type_mapping = {
 }
 
 
+def _unquoted(name: str) -> str:
+    """An all lower-case Oracle name is an unquoted one, stored upper-case."""
+    return name.upper() if name == name.lower() else name
+
+
 class Backend(OracleBackend):
     def __init__(self, arraysize: int = 500):
         super().__init__()
@@ -145,11 +150,25 @@ class Backend(OracleBackend):
             cur.execute(f"SELECT * FROM {source} t0 WHERE ROWNUM <= 1")
             return [(column[0], _get_type(column)) for column in cur.description]
 
+    def _stored_name(self, name: str, database: str) -> str:
+        """`name` as Oracle stores it: a table's own spelling when one matches regardless of
+        case, else an unquoted (all lower-case) name's upper case, as SQLAlchemy read it on ibis
+        7; ibis 12 quotes every identifier, which in Oracle is case-sensitive."""
+        tables = self.list_tables(database=database)
+        if name in tables:
+            return name
+        return next((t for t in tables if t.lower() == name.lower()), _unquoted(name))
+
+    def table(self, name: str, /, *, database=None):
+        if isinstance(database, str):
+            database = _unquoted(database)
+        db = self._to_sqlglot_table(database).db or self.current_database
+        return super().table(self._stored_name(name, db), database=database)
+
     def get_schema(self, name: str, *, catalog: Optional[str] = None,
                    database: Optional[str] = None) -> sch.Schema:
         database = database or self.current_database
-        tables = self.list_tables(database=database)
-        table = next((t for t in tables if t.lower() == name.lower()), name.upper())
+        table = self._stored_name(name, database)
         return sch.Schema(dict(self._metadata(f'"{database}"."{table}"')))
 
     def _get_schema_using_query(self, query: str) -> sch.Schema:

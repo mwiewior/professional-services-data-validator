@@ -170,3 +170,30 @@ def test_get_schema_reads_oracle_types_as_dvt_does(module_under_test):
         "TS": "timestamp",
         "NAME": "string",
     }
+
+
+@pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
+@pytest.mark.parametrize(
+    "name,database,stored,expected",
+    [
+        # an unquoted (lower-case) name is Oracle's upper-case one, as SQLAlchemy read it
+        ("cust", "SPIKE", ["CUST"], '"SPIKE"."CUST"'),
+        ("cust", "spike", ["CUST"], '"SPIKE"."CUST"'),
+        # a table created with a quoted mixed- or lower-case name keeps it
+        ("MixedCase", "APP", ["MixedCase"], '"APP"."MixedCase"'),
+        ("lower_t", "APP", ["lower_t"], '"APP"."lower_t"'),
+    ],
+)
+def test_a_table_is_queried_by_its_stored_name(
+    module_under_test, name, database, stored, expected
+):
+    import ibis
+    import oracledb
+
+    description = [("ID", oracledb.DB_TYPE_NUMBER, 9, None, 8, 0, 0)]
+    backend, _cursor = _connected(module_under_test, description)
+    backend.list_tables = mock.Mock(return_value=stored)
+
+    table = backend.table(name, database=database)
+
+    assert expected in ibis.to_sql(table.count(), dialect="oracle")
