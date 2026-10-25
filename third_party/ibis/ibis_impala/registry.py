@@ -66,5 +66,6 @@ def sa_strftime(t, op):
         time_mapping = hive_dialect.time_mapping
     reverse_hive_mapping = {v: k for k, v in time_mapping.items()}
     format_str = sg.time.format_time(op.format_str.value, reverse_hive_mapping)
-    targ = t.translate(ops.Cast(op.arg, to=dt.string))
-    return f"from_unixtime(unix_timestamp({targ}, {format_str!r}), {format_str!r})"
+    # date_format reads a date or timestamp as it is: a round trip through unix_timestamp() of its
+    # text parses it again, which Spark's ANSI mode refuses for a timestamp with fractional seconds
+    return f"date_format({t.translate(op.arg)}, {format_str!r})"
