@@ -76,6 +76,9 @@ def do_connect(
 def parse_type(t):
     """Returns the Ibis datatype from source type."""
     t = t.lower()
+    # Spark SQL's zone-less timestamp (Databricks, Spark 3.4+), read through the Thrift server
+    if t == "timestamp_ntz":
+        return "timestamp"
     if t in udf._impala_to_ibis_type:
         return udf._impala_to_ibis_type[t]
     else:
