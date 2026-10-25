@@ -61,7 +61,11 @@ def clickhouse_connect(host="localhost", port=None, user="default", password="",
 
 
 def duckdb_connect(database=":memory:", read_only=False):
-    return _connect("duckdb", database=database, read_only=_bool(read_only))
+    from third_party.ibis.ibis_addon.operations import DuckDBEngineCompiler
+
+    backend = _connect("duckdb", database=database, read_only=_bool(read_only))
+    backend.compiler = DuckDBEngineCompiler()  # a source's or target's text, not the combiner's
+    return backend
 
 
 def sqlite_connect(database=None):

@@ -675,24 +675,32 @@ _ENGINE_TEXT = {
         self.f.SHA256(arg)))),
     DataFusionCompiler: (lambda self, arg: self.f.encode(arg, "hex"),
                          lambda self, arg: self.f.encode(self.f.sha256(arg), "hex")),
-    DuckDBCompiler: (None, None),  # its binary rule is above, its sha256 is lower-case hex
+    # its binary rule is above, its sha256 is lower-case hex; the text rules go on
+    # DuckDBEngineCompiler, not on the comparison engine
+    DuckDBCompiler: (None, None),
     SQLiteCompiler: (_lower_hex, None),
     FlinkCompiler: (None, lambda self, arg: self.f.sha256(arg)),  # hex text already
     ExasolCompiler: (None, lambda self, arg: self.f.lower(self.f.hash_sha256(arg))),
     DruidCompiler: (None, None),
 }
+class DuckDBEngineCompiler(DuckDBCompiler):
+    """DuckDB as a source or target (DVT's DuckDB connection type): a number's text as Oracle
+    writes it. DuckDB as DVT's comparison engine keeps DuckDBCompiler, whose text is the report
+    text DVT has always written (10.0, a float's own)."""
+
+
 # a float's text as Oracle's (1.5, 0): Trino's own is scientific (1.5E0), DuckDB's keeps .0
 _FLOAT_TEXT = {
     # format('%s', NULL) is the text 'null': a NULL stays NULL
     TrinoCompiler: lambda self, arg, original: self.if_(
         sge.Is(this=arg, expression=NULL), NULL,
         _trimmed_decimal_text(self, self.f.format(sge.convert("%s"), arg))),
-    DuckDBCompiler: lambda self, arg, original: _trimmed_decimal_text(self, original()),
+    DuckDBEngineCompiler: lambda self, arg, original: _trimmed_decimal_text(self, original()),
 }
 for _compiler, (_hex, _sha256) in _ENGINE_TEXT.items():
     if _compiler is DuckDBCompiler:
-        # after the binary rule above
-        _wrap(_compiler, "Cast", _cast_with(None, _FLOAT_TEXT[DuckDBCompiler]))
+        # the engine's own subclass, around the comparison engine's binary rule above
+        _wrap(DuckDBEngineCompiler, "Cast", _cast_with(None, _FLOAT_TEXT[DuckDBEngineCompiler]))
         continue
     _wrap(_compiler, "Cast", _cast_with(_hex, _FLOAT_TEXT.get(_compiler)))
     if _sha256 is not None:

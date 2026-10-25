@@ -1369,3 +1369,17 @@ def test_a_decimal_below_one_keeps_its_leading_zero(module_under_test):
 
     assert sorted(report[consts.SOURCE_AGG_VALUE]) == ["-0.01", "0.5"]
     assert sorted(report[consts.TARGET_AGG_VALUE]) == ["-0.01", "0.5"]
+
+
+def test_the_comparison_engine_writes_floats_and_decimals_as_ibis_7_did(module_under_test):
+    """DuckDB as a source or target trims a number's text as Oracle writes it; DuckDB as DVT's
+    comparison engine keeps the report text DVT has always written (10.0, a float's own)."""
+    source_df = pandas.DataFrame({"id": [1, 2], "val": [10.0, 2.5]})
+    target_df = pandas.DataFrame({"id": [1, 2], "val": [10.0, 2.5]})
+
+    report = module_under_test.generate_report(
+        _row_metadata("val"), source_df, target_df, join_on_fields=("id",),
+        is_value_comparison=True,
+    )
+
+    assert sorted(report[consts.SOURCE_AGG_VALUE]) == ["10.0", "2.5"]

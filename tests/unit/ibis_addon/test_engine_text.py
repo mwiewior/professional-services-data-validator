@@ -29,6 +29,10 @@ EXPECTED = ["1234.5", "0.5", "10", "-0.01", "7"]
 
 def _engine(name):
     pytest.importorskip(name)
+    if name == "duckdb":  # DVT's DuckDB connection type, not its comparison engine
+        from third_party.ibis.ibis_engines import duckdb_connect
+
+        return duckdb_connect()
     return getattr(ibis, name).connect()
 
 
