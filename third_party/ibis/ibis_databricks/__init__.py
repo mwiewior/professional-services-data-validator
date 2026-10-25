@@ -18,6 +18,11 @@ from ibis.backends.databricks import Backend as DatabricksBackend
 
 
 class Backend(DatabricksBackend):
+    def _post_connect(self, *, memtable_volume: str) -> None:
+        """Nothing: ibis 12 creates a Unity Catalog volume here for in-memory tables, which DVT
+        never sends to a target (its comparison runs in DuckDB), so a comparison leaves the
+        workspace as it found it and needs no CREATE VOLUME privilege."""
+
     def list_primary_key_columns(self, database: str, table: str) -> list:
         """Unity Catalog keys are informational only: DVT takes keys from its arguments."""
         return None
@@ -46,5 +51,7 @@ def databricks_connect(
         access_token=token,
         catalog=catalog,
         schema=schema,
+        # a name of DVT's own: ibis names it after the OS user, which a container's uid may lack
+        memtable_volume="dvt",
     )
     return backend
