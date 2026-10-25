@@ -42,6 +42,9 @@ dependencies = [
     "jellyfish>=1.1.0",
     # DVT's own result handling is written for pandas 2 (pandas 3 changes string dtypes)
     "pandas>=2,<3",
+    # DuckDB, the comparison engine: 2.0 renamed the connection's fetch_arrow_table, which
+    # ibis 12.0.0 calls
+    "duckdb>=1.1,<2",
     "parsy>=2.1",
     "psycopg2-binary>=2.9.9",
     "pyarrow",

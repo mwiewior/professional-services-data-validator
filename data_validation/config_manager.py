@@ -149,9 +149,9 @@ class ConfigManager(object):
         """
         try:
             if self.source_client and self.source_client.name in ("oracle", "postgres"):
-                self.source_client.con.dispose()
+                self.source_client.disconnect()
             if self.target_client and self.target_client.name in ("oracle", "postgres"):
-                self.target_client.con.dispose()
+                self.target_client.disconnect()
         except Exception as exc:
             # No need to reraise, we can silently fail if exiting throws up an issue.
             logging.warning("Exception closing connections: %s", str(exc))

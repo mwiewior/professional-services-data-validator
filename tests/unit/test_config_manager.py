@@ -629,3 +629,21 @@ def test_config_manager_is_uuid(
     )
 
     assert config_manager._is_uuid(source_type, target_type) == expected_result
+
+
+def test_close_client_connections_disconnects_oracle_and_postgres(module_under_test):
+    """ibis 12's backends close with `disconnect` (ibis 7's SQLAlchemy engines had `dispose`)."""
+    config_manager = module_under_test.ConfigManager(
+        SAMPLE_CONFIG, MockIbisClient(), MockIbisClient(), verbose=False
+    )
+    config_manager.source_client = mock.Mock()
+    config_manager.source_client.name = "oracle"
+    config_manager.target_client = mock.Mock()
+    config_manager.target_client.name = "bigquery"
+
+    with mock.patch("logging.warning") as warning:
+        config_manager.close_client_connections()
+
+    config_manager.source_client.disconnect.assert_called_once_with()
+    config_manager.target_client.disconnect.assert_not_called()
+    warning.assert_not_called()

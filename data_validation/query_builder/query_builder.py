@@ -27,7 +27,7 @@ class AggregateField(object):
         """A representation of a table or column aggregate in Ibis
 
         Args:
-            ibis_expr (ColumnExpr): A column aggregation to use from Ibis
+            ibis_expr (Column): A column aggregation to use from Ibis
             field_name (String: A field to act on in the table.
                 Table level expr do not have a field name
             alias (String): A field to use as the aggregate alias name
@@ -41,14 +41,14 @@ class AggregateField(object):
     def count(field_name=None, alias=None, cast=None):
         if field_name:
             return AggregateField(
-                ibis.expr.types.ColumnExpr.count,
+                ibis.expr.types.Column.count,
                 field_name=field_name,
                 alias=alias,
                 cast=cast,
             )
         else:
             return AggregateField(
-                ibis.expr.types.TableExpr.count,
+                ibis.expr.types.Table.count,
                 field_name=field_name,
                 alias=alias,
                 cast=cast,
@@ -57,7 +57,7 @@ class AggregateField(object):
     @staticmethod
     def min(field_name=None, alias=None, cast=None):
         return AggregateField(
-            ibis.expr.types.ColumnExpr.min,
+            ibis.expr.types.Column.min,
             field_name=field_name,
             alias=alias,
             cast=cast,
@@ -75,7 +75,7 @@ class AggregateField(object):
     @staticmethod
     def max(field_name=None, alias=None, cast=None):
         return AggregateField(
-            ibis.expr.types.ColumnExpr.max,
+            ibis.expr.types.Column.max,
             field_name=field_name,
             alias=alias,
             cast=cast,
@@ -132,7 +132,7 @@ class FilterField(object):
             (right or right_field).
 
         Args:
-            ibis_expr (ColumnExpr): A column expression to be used for comparisons (None represents a custom filter).
+            ibis_expr (Column): A column expression to be used for comparisons (None represents a custom filter).
             left (Object): A value to compare on the left side of the expression
             left_field (String): A column name to be used to filter against
             right (Object): A value to compare on the right side of the expression
@@ -149,32 +149,32 @@ class FilterField(object):
     def greater_than(field_name, value):
         # Build Left and Right Objects
         return FilterField(
-            ibis.expr.types.ColumnExpr.__gt__, left_field=field_name, right=value
+            ibis.expr.types.Column.__gt__, left_field=field_name, right=value
         )
 
     @staticmethod
     def less_than(field_name, value):
         # Build Left and Right Objects
         return FilterField(
-            ibis.expr.types.ColumnExpr.__lt__, left_field=field_name, right=value
+            ibis.expr.types.Column.__lt__, left_field=field_name, right=value
         )
 
     @staticmethod
     def equal_to(field_name, value):
         # Build Left and Right Objects
         return FilterField(
-            ibis.expr.types.ColumnExpr.__eq__, left_field=field_name, right=value
+            ibis.expr.types.Column.__eq__, left_field=field_name, right=value
         )
 
     @staticmethod
     def is_null(field_name):
-        return FilterField(ibis.expr.types.ColumnExpr.isnull, left_field=field_name)
+        return FilterField(ibis.expr.types.Column.isnull, left_field=field_name)
 
     @staticmethod
     def isin(field_name, values):
         # Build Left and Right Objects
         return FilterField(
-            ibis.expr.types.ColumnExpr.isin, left_field=field_name, right=values
+            ibis.expr.types.Column.isin, left_field=field_name, right=values
         )
 
     @staticmethod

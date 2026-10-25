@@ -13,6 +13,8 @@
 # limitations under the License.
 """Every calculated field DVT builds compiles on ibis 12, on each of Axis's engines."""
 
+import re
+
 import ibis
 import pytest
 
@@ -72,3 +74,31 @@ def test_the_farm_fingerprint_hash_is_bigquerys():
     )
     sql = str(ibis.to_sql(TABLE.select(field.compile(TABLE)), dialect="bigquery"))
     assert "FARM_FINGERPRINT(" in sql.upper()
+
+
+AGGREGATES = {
+    "count": ("i", {}),
+    "count_table": (None, {}),
+    "min": ("i", {}),
+    "max": ("i", {}),
+    "avg": ("i", {}),
+    "sum": ("i", {}),
+    "bit_xor": ("i", {}),
+    "std": ("i", {}),
+    "sum_cast": ("i", {"cast": "int64"}),
+}
+
+
+@pytest.mark.parametrize("dialect", ["oracle", "bigquery", "databricks", "impala"])
+@pytest.mark.parametrize("name", sorted(AGGREGATES))
+def test_an_aggregate_compiles(name, dialect):
+    from data_validation.query_builder.query_builder import AggregateField
+
+    field_name, extra = AGGREGATES[name]
+    build = getattr(AggregateField, name.split("_")[0] if name != "bit_xor" else name)
+    if name == "bit_xor" and dialect in ("oracle", "impala"):
+        pytest.skip(f"{dialect} has no bit_xor aggregate")
+    table = ibis.table({"i": "int64"}, name="t")
+    agg = build(field_name=field_name, alias="x", **extra).compile(table)
+    sql = str(ibis.to_sql(table.aggregate([agg]), dialect=dialect))
+    assert "as x" in re.sub(r'["`]', "", sql.lower())

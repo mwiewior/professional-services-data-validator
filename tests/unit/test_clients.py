@@ -237,3 +237,11 @@ def test_get_pandas_data_client():
 
     assert isinstance(ibis_client, DuckDBBackend)
     assert ibis_client.table("my_table").count().execute() == 2
+
+
+def test_a_querys_schema_on_the_comparison_engine():
+    """DVT's comparison engine (DuckDB) reports a custom query's columns: ibis 12.0.0 needs a
+    DuckDB 1.x (2.0 renamed `fetch_arrow_table`)."""
+    client = clients.in_memory_duckdb()
+    schema = clients.get_ibis_query_schema(client, "select 1 as id, 'a' as name")
+    assert dict(schema.items()) == {"id": ibis.dtype("int32"), "name": ibis.dtype("string")}
