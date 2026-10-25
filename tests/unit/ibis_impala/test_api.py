@@ -56,3 +56,20 @@ def test_connecting_leaves_no_cursor_open():
         impala_connect(host="spark", user="axis")
 
     assert cursors and all(c.close.called for c in cursors)
+
+
+def test_options_ibis_12_has_no_form_of_are_named_not_dropped(caplog):
+    """ibis 12's Impala backend has no connection pool and no HDFS client: a connection that
+    sets either says it is ignored, rather than dropping it silently."""
+    con = mock.MagicMock()
+    with mock.patch("impala.dbapi.connect", return_value=con):
+        impala_connect(host="spark", user="axis", pool_size=4, hdfs_client="http://nn:9870")
+
+    assert "pool_size" in caplog.text and "hdfs_client" in caplog.text
+
+
+def test_default_options_log_nothing(caplog):
+    con = mock.MagicMock()
+    with mock.patch("impala.dbapi.connect", return_value=con):
+        impala_connect(host="spark", user="axis")
+    assert "ignored" not in caplog.text

@@ -142,6 +142,14 @@ class Backend(OracleBackend):
         super().__init__()
         self.arraysize = arraysize
 
+    def do_connect(self, *, user: str, password: str, dsn: str, **connect_args) -> None:
+        """ibis 12's connect, with the connection file's oracledb options (`connect_args`), which
+        its own drops."""
+        self.con = oracledb.connect(
+            dsn, user=user, password=password, stmtcachesize=0, **connect_args
+        )
+        self._post_connect()
+
     def _post_connect(self) -> None:
         super()._post_connect()
         # ibis 12 turns on Decimals for every NUMBER; DVT reads the driver's ints and floats

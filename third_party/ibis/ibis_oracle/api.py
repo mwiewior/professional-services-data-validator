@@ -39,13 +39,10 @@ def oracle_connect(
         oracledb.init_oracle_client(config_dir=connect_args_dict.get("config_dir"))
     backend = OracleBackend()
     if url is not None:
-        backend.do_connect(user=user, password=password, dsn=url.split("@", 1)[-1])
+        dsn = url.split("@", 1)[-1]
+    elif protocol == "TCP":
+        dsn = oracledb.makedsn(host, port, service_name=database)
     else:
-        backend.do_connect(
-            user=user,
-            password=password,
-            dsn=oracledb.makedsn(host, port, service_name=database)
-            if protocol == "TCP"
-            else f"{protocol.lower()}://{host}:{port}/{database}",
-        )
+        dsn = f"{protocol.lower()}://{host}:{port}/{database}"
+    backend.do_connect(user=user, password=password, dsn=dsn, **connect_args_dict)
     return backend

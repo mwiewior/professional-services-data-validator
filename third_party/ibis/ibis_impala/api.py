@@ -14,6 +14,7 @@
 """DVT's Impala backend: ibis 12's, reached over HiveServer2 (Impala, Hive or a Spark Thrift
 server), with DVT's own reading of the server's type names (Spark's `timestamp_ntz` included)."""
 
+import logging
 import re
 from functools import lru_cache
 from typing import Literal
@@ -139,6 +140,12 @@ def impala_connect(
     use_http_transport: bool = False,
     http_path: str = "",
 ):
+    ignored = [name for name, value, default in
+               (("pool_size", pool_size, 8), ("hdfs_client", hdfs_client, None))
+               if value != default]
+    if ignored:
+        logging.warning("Impala connection: %s ignored, ibis 12 has no form of it",
+                        ", ".join(ignored))
     backend = Backend()
     backend.do_connect(
         host=host, port=int(port), database=database, timeout=timeout, use_ssl=use_ssl,

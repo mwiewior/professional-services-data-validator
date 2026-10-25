@@ -43,11 +43,13 @@ DVT_CORE_TYPES_CURS = [
 
 def get_module_under_test():
     try:
-        from third_party.ibis import ibis_oracle
+        import oracledb  # noqa: F401
     except ModuleNotFoundError:
         # We don't install Oracle client for Github unit tests.
         # These tests will only complete when executed locally.
-        ibis_oracle = None
+        return None
+    # imported outside the guard: a backend that fails to import fails its tests
+    from third_party.ibis import ibis_oracle
 
     return ibis_oracle
 
@@ -250,3 +252,24 @@ def test_execute_keeps_the_drivers_numbers(module_under_test):
     df = backend.execute(expr)
 
     assert [repr(df[c][0]) for c in df.columns] == ["np.int64(10)", "np.float64(-0.01)"]
+
+
+def test_a_connections_driver_options_reach_oracledb(module_under_test):
+    """A connection file's connect_args are oracledb's own options, as on ibis 7 (whose
+    SQLAlchemy engine passed them on): disable_oob, config_dir for a thin-mode tnsnames."""
+    from third_party.ibis.ibis_oracle.api import oracle_connect
+
+    with mock.patch("oracledb.connect") as connect, mock.patch.object(
+        module_under_test.Backend, "_post_connect"
+    ):
+        oracle_connect(
+            host="db",
+            user="u",
+            password="p",
+            database="FREEPDB1",
+            connect_args='{"disable_oob": true, "config_dir": "/tns"}',
+        )
+
+    assert connect.call_args.kwargs["disable_oob"] is True
+    assert connect.call_args.kwargs["config_dir"] == "/tns"
+    assert connect.call_args.kwargs["user"] == "u"
