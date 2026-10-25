@@ -197,3 +197,24 @@ def test_a_table_is_queried_by_its_stored_name(
     table = backend.table(name, database=database)
 
     assert expected in ibis.to_sql(table.count(), dialect="oracle")
+
+
+@pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
+def test_a_number_is_read_as_the_driver_returns_it(module_under_test):
+    """As on ibis 7 (no Decimal conversion): an unconstrained NUMBER key 2 reads 2.0, so its
+    text in DVT's report stays "2.0"; NUMBER(p,0) stays an int of any size."""
+    import ibis
+
+    backend = module_under_test.Backend()
+    cursor = [(2.0, 12345678901234567890123456789012345678, 1.5)]
+    schema = ibis.schema(
+        {"ID": "decimal", "BIG": "decimal(38, 0)", "AMT": "decimal(10, 2)"}
+    )
+
+    df = backend._fetch_from_cursor(cursor, schema)
+
+    assert [str(df[c][0]) for c in df.columns] == [
+        "2.0",
+        "12345678901234567890123456789012345678",
+        "1.5",
+    ]

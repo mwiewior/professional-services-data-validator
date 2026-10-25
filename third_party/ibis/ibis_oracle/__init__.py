@@ -21,6 +21,7 @@ import ibis.expr.datatypes as dt
 import ibis.expr.schema as sch
 import oracledb
 from ibis.backends.oracle import Backend as OracleBackend
+from ibis.backends.oracle.converter import OraclePandasData
 
 ORACLE_SYSTEM_SCHEMAS = {
     "ANONYMOUS",
@@ -121,6 +122,16 @@ _type_mapping = {
 }
 
 
+class _DriverNumbers(OraclePandasData):
+    """Oracle results with each NUMBER as the driver returns it (an int, or a float when it has a
+    fraction or no scale), as ibis 7 left them: DVT's report text ("2.0" for an unconstrained
+    NUMBER key) and its comparison are built on those values."""
+
+    @classmethod
+    def convert_Decimal(cls, s, dtype, pandas_type):
+        return s
+
+
 def _unquoted(name: str) -> str:
     """An all lower-case Oracle name is an unquoted one, stored upper-case."""
     return name.upper() if name == name.lower() else name
@@ -141,6 +152,12 @@ class Backend(OracleBackend):
         with self.con.cursor() as cur:
             cur.execute("select sys_context('USERENV', 'SERVICE_NAME') from dual")
             self.database_name = cur.fetchall()[0][0]
+
+    def _fetch_from_cursor(self, cursor, schema: sch.Schema):
+        import pandas as pd
+
+        df = pd.DataFrame.from_records(cursor, columns=schema.names, coerce_float=True)
+        return _DriverNumbers.convert_table(df, schema)
 
     def _metadata(self, source: str) -> Iterable[Tuple[str, dt.DataType]]:
         """The types of `source` (a table reference or a query) as DVT reads them, from the
