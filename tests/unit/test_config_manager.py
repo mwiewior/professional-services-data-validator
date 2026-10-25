@@ -647,3 +647,26 @@ def test_close_client_connections_disconnects_oracle_and_postgres(module_under_t
     config_manager.source_client.disconnect.assert_called_once_with()
     config_manager.target_client.disconnect.assert_not_called()
     warning.assert_not_called()
+
+
+def test_a_backend_without_a_key_lookup_gives_no_keys(module_under_test):
+    """Trino, ClickHouse and ibis 12's other engines have no list_primary_key_columns: a row
+    validation without --primary-keys then reaches DVT's own 'include --primary-keys' error,
+    rather than failing on the missing method."""
+    config_manager = module_under_test.ConfigManager(
+        SAMPLE_CONFIG, MockIbisClient(), MockIbisClient(), verbose=False
+    )
+    # MockIbisClient has no list_primary_key_columns, as ibis 12's own backends
+    assert config_manager.auto_list_primary_keys() == []
+
+
+def test_the_other_sides_key_is_used_when_one_backend_has_no_lookup(module_under_test):
+    class KeyedClient(MockIbisClient):
+        def list_primary_key_columns(self, database, table):
+            return ["ID"]
+
+    config_manager = module_under_test.ConfigManager(
+        SAMPLE_CONFIG, MockIbisClient(), KeyedClient(), verbose=False
+    )
+
+    assert config_manager.auto_list_primary_keys() == ["ID"]

@@ -26,7 +26,8 @@ engine is proven differs:
 |---|---|
 | [Oracle](docs/connections.md#oracle), [BigQuery](docs/connections.md#google-bigquery) (and its emulator), [Impala](docs/connections.md#impala) (and a Spark Thrift server), Databricks (SQL warehouses) | the Axis migration tool's live suites and a real Databricks SQL warehouse |
 | [MSSQL](docs/connections.md#mssql-server), [Postgres](docs/connections.md#postgres), [MySQL](docs/connections.md#mysql), Trino, ClickHouse, DuckDB | Docker system tests (`tests/system/ibis12/run.sh`): schema, column and row validations, equal tables and a changed cell, each engine against itself and against Oracle |
-| [Snowflake](docs/connections.md#snowflake), Athena, Exasol, Druid, Materialize, RisingWave, SingleStoreDB, SQLite, DataFusion, Polars, PySpark, Flink | compile tests of DVT's rules (`tests/unit/ibis_addon`); SQLite, DataFusion and DuckDB's rules also executed |
+| [Snowflake](docs/connections.md#snowflake), Athena, Exasol, Druid, Materialize, RisingWave, SingleStoreDB, SQLite, DataFusion, PySpark, Flink | compile tests of DVT's rules (`tests/unit/ibis_addon`); SQLite, DataFusion and DuckDB's rules also executed |
+| Polars | reading tables from files (`tests/unit/test_ibis_engines.py`); it isn't a SQL engine, so DVT's text and hash rules don't reach it: no hash validation, a decimal keeps its scale (`1234.50`), a binary column can't be compared |
 | [FileSystem](docs/connections.md#filesystem) | unit tests, read through DuckDB |
 
 The engines beyond Oracle, BigQuery, Impala, Databricks, Postgres and DuckDB need their extra,

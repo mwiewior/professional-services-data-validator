@@ -64,6 +64,7 @@ HEXDIGEST = {
     "materialize": "encode(sha256(convert_to(t0.s, 'utf8')), 'hex')",
     "risingwave": "encode(sha256(convert_to(t0.s, 'utf8')), 'hex')",
     "datafusion": "encode(sha256(t0.s), 'hex')",
+    "pyspark": "sha2(t0.s, 256)",
 }
 
 BINARY_LENGTH = {
@@ -93,6 +94,7 @@ DECIMAL_TO_STRING = {
     "flink": "if(cast(t0.d as string) like '%.%', trim(trailing '.' from trim(trailing '0' from cast(t0.d as string)))",
     "druid": "case when cast(t0.d as varchar) like '%.%' then trim(trailing '.' from trim(trailing '0' from cast(t0.d as varchar)))",
     "materialize": "trim(trailing '.' from to_char(t0.d, 'fm99999990.99'))",
+    "pyspark": "regexp_replace(regexp_replace(cast(t0.d as string), '([.][0-9]*?)0+$', '$1'), '[.]$', '')",
 }
 
 BINARY_TO_STRING = {
@@ -109,6 +111,7 @@ BINARY_TO_STRING = {
     "sqlite": "lower(hex(t0.b))",
     "datafusion": "encode(t0.b, 'hex')",
     "materialize": "encode(t0.b, 'hex')",
+    "pyspark": "lower(hex(t0.b))",
 }
 
 EPOCH_SECONDS = {
@@ -123,6 +126,7 @@ RSTRIP = {
     "impala": "trim(trailing ' ' || chr(9) || chr(10) || chr(13) || chr(11) || chr(12) from t0.s)",
     "databricks": "trim(trailing ' ' || chr(9) || chr(10) || chr(13) || chr(11) || chr(12) from t0.s)",
     "mssql": "rtrim(convert(nvarchar(max), t0.s))",
+    "pyspark": "trim(trailing ' ' || chr(9) || chr(10) || chr(13) || chr(11) || chr(12) from t0.s)",
 }
 
 
@@ -156,13 +160,14 @@ def test_rstrip_strips_every_whitespace_character(dialect, fragment):
     assert _norm(fragment) in _sql(TABLE.s.rstrip().name("x"), dialect)
 
 
-@pytest.mark.parametrize("dialect", ["bigquery", "impala", "databricks"])
+@pytest.mark.parametrize("dialect", ["bigquery", "impala", "databricks", "pyspark"])
 def test_strftime_reads_a_timestamp_as_it_is(dialect):
     sql = _sql(TABLE.ts.strftime("%Y-%m-%d %H:%M:%S").name("x"), dialect)
     expected = {
         "bigquery": "format_datetime('%e4y-%m-%d %t', datetime(t0.ts))",
         "impala": "date_format(t0.ts, 'yyyy-mm-dd hh:mm:ss')",
         "databricks": "date_format(t0.ts, 'yyyy-mm-dd hh:mm:ss')",
+        "pyspark": "date_format(t0.ts, 'yyyy-mm-dd hh:mm:ss')",
     }[dialect]
     assert expected in sql
 
