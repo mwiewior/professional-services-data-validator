@@ -32,6 +32,13 @@ def sa_cast(t, op):
     elif arg_dtype.is_string() and typ.is_binary():
         # Binary from string cast is a "from hex" conversion for DVT.
         return f"unhex({arg_formatted})"
+    elif arg_dtype.is_decimal() and typ.is_string():
+        # Spark writes a decimal's text with its scale (14679.00); Oracle and BigQuery write it
+        # without trailing zeros (14679), so an aggregate or a row hash compared as text would differ
+        return (
+            f"regexp_replace(regexp_replace(CAST({arg_formatted} AS STRING), "
+            "'([.][0-9]*?)0+$', '$1'), '[.]$', '')"
+        )
 
     # Cannot use sa_fixed_cast() because of ImpalaExprTranslator ancestry.
     sql_type = base_type_to_sql_string(typ)
