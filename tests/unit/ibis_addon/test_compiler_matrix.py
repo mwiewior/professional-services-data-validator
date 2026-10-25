@@ -56,6 +56,14 @@ HEXDIGEST = {
     "snowflake": "sha2(t0.s)",
     "oracle": "lower(standard_hash(convert(t0.s, 'utf8'), 'sha256'))",
     "duckdb": "sha256(t0.s)",
+    "trino": "lower(to_hex(sha256(to_utf8(t0.s))))",
+    "athena": "lower(to_hex(sha256(to_utf8(t0.s))))",
+    "clickhouse": "lower(hex(sha256(t0.s)))",
+    "exasol": "lower(hash_sha256(t0.s))",
+    "flink": "sha256(t0.s)",
+    "materialize": "encode(sha256(convert_to(t0.s, 'utf8')), 'hex')",
+    "risingwave": "encode(sha256(convert_to(t0.s, 'utf8')), 'hex')",
+    "datafusion": "encode(sha256(t0.s), 'hex')",
 }
 
 BINARY_LENGTH = {
@@ -78,6 +86,13 @@ DECIMAL_TO_STRING = {
     "snowflake": "rtrim(to_char(t0.d, 'fm99999990.99'), '.')",
     "impala": "regexp_replace(regexp_replace(cast(t0.d as string), '([.][0-9]*?)0+$', '$1'), '[.]$', '')",
     "databricks": "regexp_replace(regexp_replace(cast(t0.d as string), '([.][0-9]*?)0+$', '$1'), '[.]$', '')",
+    "trino": "if(cast(t0.d as varchar) like '%.%', trim(trailing '.' from trim(trailing '0' from cast(t0.d as varchar))), cast(t0.d as varchar))",
+    "athena": "if(cast(t0.d as varchar) like '%.%', trim(trailing '.' from trim(trailing '0' from cast(t0.d as varchar))), cast(t0.d as varchar))",
+    "clickhouse": "case when cast(t0.d as nullable(string)) like '%.%' then trim(trailing '.' from trim(trailing '0' from cast(t0.d as nullable(string))))",
+    "exasol": "case when cast(t0.d as varchar(2000000)) like '%.%' then trim(trailing '.' from trim(trailing '0' from",
+    "flink": "if(cast(t0.d as string) like '%.%', trim(trailing '.' from trim(trailing '0' from cast(t0.d as string)))",
+    "druid": "case when cast(t0.d as varchar) like '%.%' then trim(trailing '.' from trim(trailing '0' from cast(t0.d as varchar)))",
+    "materialize": "trim(trailing '.' from to_char(t0.d, 'fm99999990.99'))",
 }
 
 BINARY_TO_STRING = {
@@ -89,6 +104,11 @@ BINARY_TO_STRING = {
     "snowflake": "hex_encode(t0.b, 0)",
     "impala": "lower(hex(t0.b))",
     "databricks": "lower(hex(t0.b))",
+    "trino": "lower(to_hex(t0.b))",
+    "clickhouse": "lower(hex(t0.b))",
+    "sqlite": "lower(hex(t0.b))",
+    "datafusion": "encode(t0.b, 'hex')",
+    "materialize": "encode(t0.b, 'hex')",
 }
 
 EPOCH_SECONDS = {
@@ -161,3 +181,24 @@ def test_a_single_column_concat_is_the_column(dialect):
 def test_an_integer_sum_and_mean_on_sql_server_avoid_int_overflow_and_truncation():
     assert "sum(cast(t0.i as bigint))" in _sql(TABLE.i.sum().name("x"), "mssql")
     assert "avg(cast(t0.i as float))" in _sql(TABLE.i.mean().name("x"), "mssql")
+
+
+@pytest.mark.parametrize("dialect,expected", [
+    ("exasol", "to_char(t0.ts, 'yyyy-mm-dd hh24:mi:ss')"),
+    ("druid", "time_format(t0.ts, 'yyyy-mm-dd hh:mm:ss')"),
+])
+def test_strftime_on_engines_without_ibis_own(dialect, expected):
+    assert expected in _sql(TABLE.ts.strftime("%Y-%m-%d %H:%M:%S").name("x"), dialect)
+
+
+def test_a_strftime_token_dvt_doesnt_write_is_refused_not_mistranslated():
+    with pytest.raises(NotImplementedError, match="%j"):
+        _sql(TABLE.ts.strftime("%Y-%j").name("x"), "exasol")
+
+
+def test_singlestoredb_has_mysqls_rules():
+    from ibis.backends.sql.compilers.singlestoredb import compiler
+
+    expr = TABLE.select(h=TABLE.s.hexdigest("sha256"), x=TABLE.b.cast("string"))
+    sql = _norm(compiler.to_sqlglot(expr).sql(compiler.dialect))
+    assert "sha2(t0.s, '256')" in sql and "lower(hex(t0.b))" in sql

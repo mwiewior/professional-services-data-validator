@@ -30,8 +30,13 @@ import sqlglot as sg
 import sqlglot.expressions as sge
 from ibis.backends.sql.compilers import (
     BigQueryCompiler,
+    ClickHouseCompiler,
     DatabricksCompiler,
+    DataFusionCompiler,
+    DruidCompiler,
     DuckDBCompiler,
+    ExasolCompiler,
+    FlinkCompiler,
     ImpalaCompiler,
     MSSQLCompiler,
     MySQLCompiler,
@@ -39,8 +44,11 @@ from ibis.backends.sql.compilers import (
     PostgresCompiler,
     PySparkCompiler,
     SnowflakeCompiler,
+    SQLiteCompiler,
+    TrinoCompiler,
 )
 from ibis.backends.sql.compilers.base import SQLGlotCompiler
+from ibis.backends.sql.compilers.singlestoredb import SingleStoreDBCompiler
 from ibis.expr.types import (
     BinaryValue,
     DateValue,
@@ -556,3 +564,103 @@ def _duckdb_cast(self, op, original, *, arg, to):
 
 
 _wrap(DuckDBCompiler, "Cast", _duckdb_cast)
+
+# --- ibis 12's other engines ------------------------------------------------------------------
+
+# the strftime tokens DVT's validations write (config_manager._strftime_format)
+_STRFTIME_TOKENS = {"%Y": ("YYYY", "yyyy"), "%m": ("MM", "MM"), "%d": ("DD", "dd"),
+                    "%H": ("HH24", "HH"), "%M": ("MI", "mm"), "%S": ("SS", "ss")}
+
+
+def _translated_format(fmt: str, which: int) -> str:
+    for token, forms in _STRFTIME_TOKENS.items():
+        fmt = fmt.replace(token, forms[which])
+    if "%" in fmt:
+        raise NotImplementedError(f"No translation of strftime format {fmt!r}")
+    return fmt
+
+
+def _oracle_like_format(fmt: str) -> str:
+    return _translated_format(fmt, 0)
+
+
+def _java_like_format(fmt: str) -> str:
+    return _translated_format(fmt, 1)
+
+
+
+def _trimmed_decimal_text(self, text):
+    """A decimal's text without trailing zeros (1234.50 -> 1234.5, 10.00 -> 10), as Oracle writes
+    it, in SQL every engine has (no regex back-references, which differ between engines)."""
+    trim = lambda this, chars: sge.Trim(this=this, expression=sge.convert(chars),  # noqa: E731
+                                        position="TRAILING")
+    return self.if_(sge.Like(this=text, expression=sge.convert("%.%")),
+                    trim(trim(text, "0"), "."), text)
+
+
+def _cast_with(hex_text):
+    """A Cast rule: a decimal's text without trailing zeros, a binary's as `hex_text(self, arg)`
+    (its lower-case hex; None: ibis's own)."""
+
+    def cast(self, op, original, *, arg, to):
+        from_ = op.arg.dtype
+        if from_.is_decimal() and to.is_string():
+            return _trimmed_decimal_text(self, original())
+        if hex_text is not None and from_.is_binary() and to.is_string():
+            return hex_text(self, arg)
+        return original()
+
+    return cast
+
+
+def _sha256_only(fn):
+    """A HexDigest rule for an engine whose SQL has SHA-256 only."""
+
+    def hex_digest(self, op, *, arg, how):
+        if how != "sha256":
+            raise NotImplementedError(f"No available hashing function for {how}")
+        return fn(self, arg)
+
+    return hex_digest
+
+
+def _no_sha256(engine):
+    def hex_digest(self, op, *, arg, how):
+        raise NotImplementedError(f"{engine} has no SHA-256 function: no hash validation")
+
+    return hex_digest
+
+
+_lower_hex = lambda self, arg: self.f.lower(self.f.hex(arg))  # noqa: E731
+_ENGINE_TEXT = {
+    # Trino (Athena's compiler inherits it): to_hex is upper case, sha256 takes varbinary
+    TrinoCompiler: (lambda self, arg: self.f.lower(self.f.to_hex(arg)),
+                    lambda self, arg: self.f.lower(self.f.to_hex(self.f.sha256(
+                        self.f.to_utf8(arg))))),
+    ClickHouseCompiler: (_lower_hex, lambda self, arg: self.f.lower(self.f.hex(
+        self.f.SHA256(arg)))),
+    DataFusionCompiler: (lambda self, arg: self.f.encode(arg, "hex"),
+                         lambda self, arg: self.f.encode(self.f.sha256(arg), "hex")),
+    DuckDBCompiler: (None, None),  # its binary rule is above, its sha256 is lower-case hex
+    SQLiteCompiler: (_lower_hex, None),
+    FlinkCompiler: (None, lambda self, arg: self.f.sha256(arg)),  # hex text already
+    ExasolCompiler: (None, lambda self, arg: self.f.lower(self.f.hash_sha256(arg))),
+    DruidCompiler: (None, None),
+}
+for _compiler, (_hex, _sha256) in _ENGINE_TEXT.items():
+    if _compiler is DuckDBCompiler:
+        _wrap(_compiler, "Cast", _cast_with(None))  # after the binary rule above
+        continue
+    _wrap(_compiler, "Cast", _cast_with(_hex))
+    if _sha256 is not None:
+        _method(_compiler, "HexDigest", _sha256_only(_sha256))
+_method(SQLiteCompiler, "HexDigest", _no_sha256("SQLite"))
+_method(DruidCompiler, "HexDigest", _no_sha256("Druid"))
+_method(ExasolCompiler, "Strftime", lambda self, op, *, arg, format_str: self.f.to_char(
+    arg, sge.convert(_oracle_like_format(op.format_str.value))))
+_method(DruidCompiler, "Strftime", lambda self, op, *, arg, format_str: self.f.time_format(
+    arg, sge.convert(_java_like_format(op.format_str.value))))
+
+# SingleStoreDB is MySQL's SQL, but its compiler marks a hash unsupported on its own class
+_wrap(SingleStoreDBCompiler, "Cast", _mysql_cast)
+_method(SingleStoreDBCompiler, "HexDigest", _mysql_hex_digest)
