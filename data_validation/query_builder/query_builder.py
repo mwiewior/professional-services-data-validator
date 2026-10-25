@@ -399,6 +399,11 @@ class ColumnReference(object):
         return ibis_table[self.column_name]
 
 
+def _hexdigest(value, how):
+    """ibis 12's hexdigest takes its algorithm positionally only."""
+    return value.hexdigest(how)
+
+
 class CalculatedField(object):
     def __init__(self, ibis_expr, config, fields, cast=None, **kwargs):
         """A representation of an calculated field to build a query.
@@ -434,22 +439,11 @@ class CalculatedField(object):
     @staticmethod
     def hash(config, fields):
         if config.get("default_hash_function") is None:
-            how = "sha256"
             # the hash's lower-case hex text (ibis 12's hashbytes returns bytes)
-            return CalculatedField(
-                ibis.expr.types.StringValue.hexdigest,
-                config,
-                fields,
-                how=how,
-            )
+            return CalculatedField(_hexdigest, config, fields, how="sha256")
         else:
-            how = "farm_fingerprint"
-            return CalculatedField(
-                ibis.expr.types.Value.hash,
-                config,
-                fields,
-                how=how,
-            )
+            # ibis 12's Value.hash is BigQuery's farm_fingerprint
+            return CalculatedField(ibis.expr.types.Value.hash, config, fields)
 
     @staticmethod
     def to_char(config, fields):
@@ -468,7 +462,7 @@ class CalculatedField(object):
         )
         fields = [fields[0], default_null_string]
         return CalculatedField(
-            ibis.expr.types.Value.fillna,
+            ibis.expr.types.Value.fill_null,
             config,
             fields,
         )
@@ -666,7 +660,7 @@ class QueryBuilder(object):
             or validation_type == consts.CUSTOM_QUERY
         ):
             if self.comparison_fields:
-                filtered_table = filtered_table.projection(
+                filtered_table = filtered_table.select(
                     self.compile_comparison_fields(filtered_table)
                 )
         else:
