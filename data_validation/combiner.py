@@ -192,8 +192,12 @@ def _generate_report_slice(
     # the two sides' results are compared in an in-memory DuckDB (ibis 10 removed its pandas
     # backend)
     client = clients.in_memory_duckdb()
-    source = client.create_table(consts.RESULT_TYPE_SOURCE, _typed(source_df))
-    target = client.create_table(consts.RESULT_TYPE_TARGET, _typed(target_df))
+    source = client.create_table(
+        consts.RESULT_TYPE_SOURCE, _typed(_with_decimal_text(source_df))
+    )
+    target = client.create_table(
+        consts.RESULT_TYPE_TARGET, _typed(_with_decimal_text(target_df))
+    )
 
     differences_pivot = _calculate_differences(
         source, target, join_on_fields, run_metadata.validations, is_value_comparison
@@ -236,6 +240,29 @@ def _generate_report_slice(
             result_df[column] = result_df[column].astype(
                 f"datetime64[ns, {tz}]" if tz else "datetime64[ns]")
     return result_df
+
+
+# the suffix of a column's text twin (`_with_decimal_text`)
+_TEXT = "__dvt_text"
+
+
+def _with_decimal_text(df: pandas.DataFrame) -> pandas.DataFrame:
+    """`df` with a text twin of each column holding Decimals: their text as DVT's pandas engine
+    wrote it, each value's own (`str`), where DuckDB writes a column's at one scale ("0.5" in a
+    DECIMAL(2,2) column is ".50")."""
+    twins = {
+        f"{c}{_TEXT}": df[c].map(str, na_action="ignore")
+        for c in df.columns
+        if df[c].dtype == object
+        and df[c].map(lambda v: isinstance(v, decimal.Decimal)).any()
+    }
+    return df.assign(**{k: v.astype("string") for k, v in twins.items()}) if twins else df
+
+
+def _text(table, field):
+    """`field`'s text: its twin's when it has one, else DuckDB's."""
+    twin = f"{field}{_TEXT}"
+    return table[twin] if twin in table.columns else table[field].cast("string")
 
 
 def _typed(df: pandas.DataFrame) -> pandas.DataFrame:
@@ -447,19 +474,25 @@ def _pivot_result(
                         ibis.literal(validation.num_random_rows).name(
                             consts.NUM_RANDOM_ROWS
                         ),
-                        _agg_text(result[field]).name(consts.COMBINER_AGG_VALUE),
+                        _agg_text(result, field).name(consts.COMBINER_AGG_VALUE),
                     )
                     + join_on_fields
+                    + tuple(_twins(result, join_on_fields))
                 )
             )
     return _union_all(pivots)
 
 
-def _agg_text(value):
+def _agg_text(table, field):
     """A result value as the text the report shows. A float NULL is "nan": the results came in as
     pandas frames, whose float columns hold a NULL as NaN, which DVT has always written "nan"."""
-    text = value.cast("string")
-    return text.fill_null("nan") if value.type().is_floating() else text
+    text = _text(table, field)
+    return text.fill_null("nan") if table[field].type().is_floating() else text
+
+
+def _twins(table, fields) -> list:
+    """The text twins of `fields` that `table` has."""
+    return [f"{f}{_TEXT}" for f in fields if f"{f}{_TEXT}" in table.columns]
 
 
 def _union_all(tables: list):
@@ -504,6 +537,7 @@ def _join_pivots(
         differences, _same_keys(source, differences, join_keys), how="outer"
     ).select(
         [source[field] for field in join_keys]
+        + [source[twin] for twin in _twins(source, join_on_fields)]
         + [
             source[consts.VALIDATION_TYPE],
             source[consts.AGGREGATION_TYPE],
@@ -523,8 +557,8 @@ def _join_pivots(
     )
 
     def key(field):
-        # an outer join's key is the value from whichever side has the row, as pandas merges
-        return source_difference[field].coalesce(target[field])
+        # an outer join's key is the text of whichever side has the row, as pandas merges
+        return _text(source_difference, field).coalesce(_text(target, field))
 
     if join_on_fields:
         join_values = []

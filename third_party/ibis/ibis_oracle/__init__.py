@@ -144,6 +144,8 @@ class Backend(OracleBackend):
 
     def _post_connect(self) -> None:
         super()._post_connect()
+        # ibis 12 turns on Decimals for every NUMBER; DVT reads the driver's ints and floats
+        oracledb.defaults.fetch_decimals = False
         self.con.module = "DVT"  # identifies the session in Oracle
         with self.con.cursor() as cur:
             cur.execute("ALTER SESSION SET TIME_ZONE='UTC'")
@@ -158,6 +160,16 @@ class Backend(OracleBackend):
 
         df = pd.DataFrame.from_records(cursor, columns=schema.names, coerce_float=True)
         return _DriverNumbers.convert_table(df, schema)
+
+    def execute(self, expr, /, *, params=None, limit=None, **kwargs):
+        """ibis 12's execute, whose result conversion keeps the driver's numbers too (its own
+        converts each decimal again, to the column's scale)."""
+        self._run_pre_execute_hooks(expr)
+        table = expr.as_table()
+        sql = self.compile(table, params=params, limit=limit, **kwargs)
+        with self._safe_raw_sql(sql) as cur:
+            result = self._fetch_from_cursor(cur, table.schema())
+        return expr.__pandas_result__(result, data_mapper=_DriverNumbers)
 
     def _metadata(self, source: str) -> Iterable[Tuple[str, dt.DataType]]:
         """The types of `source` (a table reference or a query) as DVT reads them, from the

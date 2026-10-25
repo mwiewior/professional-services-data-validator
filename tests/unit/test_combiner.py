@@ -1312,3 +1312,60 @@ def test_generate_report_with_binary_data(module_under_test):
     assert consts.TARGET_AGG_VALUE in report.columns
     assert report[consts.SOURCE_AGG_VALUE].iloc[0] == "aced0005"
     assert report[consts.TARGET_AGG_VALUE].iloc[0] == "aced0005"
+
+
+def _row_metadata(column):
+    return metadata.RunMetadata(
+        validations={
+            column: metadata.ValidationMetadata(
+                source_table_name="t",
+                source_table_schema="s",
+                source_column_name=column,
+                target_table_name="t",
+                target_table_schema="s",
+                target_column_name=column,
+                validation_type="Row",
+                aggregation_type="hash",
+                primary_keys=["id"],
+                num_random_rows=None,
+                threshold=0.0,
+            ),
+        },
+        start_time=datetime.datetime(1998, 9, 4, 7, 30, 1),
+        end_time=datetime.datetime(1998, 9, 4, 7, 31, 42),
+        labels=[],
+        run_id="test-run",
+    )
+
+
+def test_a_key_reads_as_the_side_with_the_row_wrote_it(module_under_test):
+    """Oracle's key 2 and BigQuery's NUMERIC 2.000000000 are one key, written as the side that
+    has the row writes it (pandas' merge kept the left value): "2", never "2.000000000"."""
+    source_df = pandas.DataFrame({"id": [2, 3], "val": ["a", "b"]})
+    target_df = pandas.DataFrame(
+        {"id": [decimal.Decimal("2.000000000"), decimal.Decimal("4.000000000")],
+         "val": ["CHANGED", "c"]}
+    )
+
+    report = module_under_test.generate_report(
+        _row_metadata("val"), source_df, target_df, join_on_fields=("id",),
+        is_value_comparison=True,
+    )
+
+    assert sorted(report[consts.GROUP_BY_COLUMNS]) == [
+        '{"id": "2"}', '{"id": "3"}', '{"id": "4.000000000"}'
+    ]
+
+
+def test_a_decimal_below_one_keeps_its_leading_zero(module_under_test):
+    """DuckDB writes a DECIMAL(2,2) -0.01 as "-.01"; DVT's report writes "-0.01"."""
+    source_df = pandas.DataFrame({"id": [1, 2], "val": [decimal.Decimal("-0.01"), decimal.Decimal("0.5")]})
+    target_df = pandas.DataFrame({"id": [1, 2], "val": [decimal.Decimal("-0.01"), decimal.Decimal("0.5")]})
+
+    report = module_under_test.generate_report(
+        _row_metadata("val"), source_df, target_df, join_on_fields=("id",),
+        is_value_comparison=True,
+    )
+
+    assert sorted(report[consts.SOURCE_AGG_VALUE]) == ["-0.01", "0.5"]
+    assert sorted(report[consts.TARGET_AGG_VALUE]) == ["-0.01", "0.5"]

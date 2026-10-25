@@ -218,3 +218,35 @@ def test_a_number_is_read_as_the_driver_returns_it(module_under_test):
         "12345678901234567890123456789012345678",
         "1.5",
     ]
+
+
+@pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
+def test_a_connection_reads_numbers_as_ints_and_floats(module_under_test):
+    """ibis 12 turns on oracledb's fetch_decimals; DVT's results (and the report's "1234.5",
+    "-0.01", "10") are built on the driver's ints and floats, as on ibis 7."""
+    import oracledb
+
+    backend, _cursor = _connected(module_under_test, rows=[("FREEPDB1",)])
+    oracledb.defaults.fetch_decimals = True
+    try:
+        backend._post_connect()
+        assert oracledb.defaults.fetch_decimals is False
+    finally:
+        oracledb.defaults.fetch_decimals = False
+
+
+@pytest.mark.skipif(not get_module_under_test(), reason="No Oracle driver")
+def test_execute_keeps_the_drivers_numbers(module_under_test):
+    """ibis 12 converts a result's decimals again after the fetch (quantized to the column's
+    scale: 10 -> Decimal('10.00')); DVT's results keep the driver's 10 and -0.01."""
+    import ibis
+
+    backend, _cursor = _connected(module_under_test)
+    expr = ibis.table({"s": "decimal(38, 2)", "m": "decimal(12, 2)"}, name="t")
+    backend.compile = mock.Mock(return_value="select 1 from dual")
+    backend._safe_raw_sql = mock.MagicMock()
+    backend._safe_raw_sql.return_value.__enter__.return_value = [(10, -0.01)]
+
+    df = backend.execute(expr)
+
+    assert [repr(df[c][0]) for c in df.columns] == ["np.int64(10)", "np.float64(-0.01)"]
