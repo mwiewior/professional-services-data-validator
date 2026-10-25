@@ -1566,11 +1566,11 @@ class ConfigManager(object):
         assert (
             self.validation_type != consts.CUSTOM_QUERY
         ), "Custom query validations should not be able to reach this method"
-        primary_keys = self.source_client.list_primary_key_columns(
-            self.source_schema, self.source_table
+        primary_keys = clients.list_primary_key_columns(
+            self.source_client, self.source_schema, self.source_table
         )
         if not primary_keys:
-            primary_keys = self.target_client.list_primary_key_columns(
-                self.target_schema, self.target_table
+            primary_keys = clients.list_primary_key_columns(
+                self.target_client, self.target_schema, self.target_table
             )
         return primary_keys or []

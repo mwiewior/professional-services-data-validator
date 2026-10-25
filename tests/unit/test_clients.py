@@ -245,3 +245,17 @@ def test_a_querys_schema_on_the_comparison_engine():
     client = clients.in_memory_duckdb()
     schema = clients.get_ibis_query_schema(client, "select 1 as id, 'a' as name")
     assert dict(schema.items()) == {"id": ibis.dtype("int32"), "name": ibis.dtype("string")}
+
+
+def test_a_backend_without_dvts_primary_key_lookup_has_no_keys():
+    """ibis 12's own backends (Trino, ClickHouse, ...) have no list_primary_key_columns: DVT
+    then takes the keys from its arguments, as for a backend that reports none."""
+    client = clients.in_memory_duckdb()
+    assert clients.list_primary_key_columns(client, "main", "t") is None
+
+
+def test_a_backends_own_primary_key_lookup_is_used():
+    client = mock.Mock()
+    client.list_primary_key_columns.return_value = ["ID"]
+    assert clients.list_primary_key_columns(client, "s", "t") == ["ID"]
+    client.list_primary_key_columns.assert_called_once_with("s", "t")

@@ -13,14 +13,14 @@
 # limitations under the License.
 
 import datetime
+import importlib
 from unittest import mock
 
 import ibis
 import pandas
+import pytest
 
 from data_validation.query_builder.query_builder import FilterField
-
-from third_party.ibis.ibis_bigquery import Backend as BigQueryBackend
 
 
 def test_filter_field_and():
@@ -111,78 +111,26 @@ def test_composite_isin_tuple_in_chunking(mock_get_max_in):
         assert sub_batch.expr == "tuple_in"
 
 
-def test_backend_class_tuple_in_supported():
+@pytest.mark.parametrize(
+    "module,supported",
+    [
+        ("third_party.ibis.ibis_oracle", True),
+        ("third_party.ibis.ibis_bigquery", True),
+        ("third_party.ibis.ibis_databricks", True),
+        ("third_party.ibis.ibis_mssql", False),
+        ("third_party.ibis.ibis_postgres", True),
+        ("third_party.ibis.ibis_mysql", True),
+        ("third_party.ibis.ibis_snowflake", True),
+    ],
+)
+def test_backend_class_tuple_in_supported(module, supported):
+    """Each DVT backend says whether its SQL has tuple IN; a backend whose driver isn't
+    installed here is skipped."""
     try:
-        from third_party.ibis.ibis_oracle import Backend as OracleBackend
-
-        assert OracleBackend().dvt_tuple_in_supported() is True
-    except ImportError:
-        pass
-
-    try:
-        from third_party.ibis.ibis_db2 import Backend as Db2Backend
-
-        assert Db2Backend().dvt_tuple_in_supported() is False
-    except ImportError:
-        pass
-
-    try:
-        from third_party.ibis.ibis_db2_zos import Backend as Db2zOSBackend
-
-        assert Db2zOSBackend().dvt_tuple_in_supported() is False
-    except ImportError:
-        pass
-
-    try:
-        from third_party.ibis.ibis_mssql import Backend as MsSqlBackend
-
-        assert MsSqlBackend().dvt_tuple_in_supported() is False
-    except ImportError:
-        pass
-
-    try:
-        from ibis.backends.postgres import Backend as PostgresBackend
-
-        assert PostgresBackend().dvt_tuple_in_supported() is True
-    except ImportError:
-        pass
-
-    try:
-        from ibis.backends.mysql import Backend as MySQLBackend
-
-        assert MySQLBackend().dvt_tuple_in_supported() is True
-    except ImportError:
-        pass
-
-    try:
-        from ibis.backends.snowflake import Backend as SnowflakeBackend
-
-        assert SnowflakeBackend().dvt_tuple_in_supported() is True
-    except ImportError:
-        pass
-
-    assert BigQueryBackend().dvt_tuple_in_supported() is True
-
-    try:
-        from third_party.ibis.ibis_sybase import Backend as SybaseBackend
-
-        assert SybaseBackend().dvt_tuple_in_supported() is False
-    except ImportError:
-        pass
-
-    try:
-        from third_party.ibis.ibis_teradata import Backend as TeradataBackend
-
-        assert TeradataBackend().dvt_tuple_in_supported() is False
-    except ImportError:
-        pass
-
-    try:
-        from third_party.ibis.ibis_redshift import Backend as RedshiftBackend
-
-        assert RedshiftBackend().dvt_tuple_in_supported() is False
-    except ImportError:
-        pass
+        backend_class = importlib.import_module(module).Backend
+    except ImportError as exc:
+        pytest.skip(f"{module}: {exc}")
+    assert backend_class().dvt_tuple_in_supported() is supported
 
 
 def test_filter_field_large_or_compilation():

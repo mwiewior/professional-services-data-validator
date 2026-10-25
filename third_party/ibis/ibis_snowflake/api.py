@@ -13,15 +13,12 @@
 # the License.
 import logging
 
-import ibis
-
 import snowflake.connector  # NOQA fail early if the driver is missing
-import snowflake.sqlalchemy  # NOQA fail early if the driver is missing
-
-logging.getLogger("snowflake.connector").setLevel(logging.WARNING)
 
 from data_validation.util import dvt_config_string_to_dict
-import third_party.ibis.ibis_snowflake.datatypes
+from third_party.ibis.ibis_snowflake import Backend as SnowflakeBackend
+
+logging.getLogger("snowflake.connector").setLevel(logging.WARNING)
 
 
 def snowflake_connect(
@@ -33,19 +30,16 @@ def snowflake_connect(
     role: str = None,
     connect_args: str = None,
 ):
-    if connect_args:
-        connect_args = dvt_config_string_to_dict(connect_args)
-
-    client_args = {
-        "user": user,
-        "password": password,
-        "account": account,
-        "database": database,
-        "connect_args": connect_args,
-    }
+    """Snowflake; `database` as "DATABASE" or "DATABASE/SCHEMA", `connect_args` the
+    connector's own options (as on ibis 7, whose SQLAlchemy engine passed them on)."""
+    client_args = {"user": user, "password": password, "account": account,
+                   "database": database}
     if role:
         client_args["role"] = role
     if warehouse:
         client_args["warehouse"] = warehouse
-
-    return ibis.snowflake.connect(**client_args)
+    if connect_args:
+        client_args.update(dvt_config_string_to_dict(connect_args))
+    backend = SnowflakeBackend()
+    backend.do_connect(**client_args)
+    return backend

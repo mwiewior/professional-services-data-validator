@@ -32,6 +32,7 @@ from data_validation.secret_manager import SecretManagerBuilder
 from third_party.ibis.ibis_bigquery.api import bigquery_connect
 from third_party.ibis.ibis_databricks import databricks_connect
 from third_party.ibis.ibis_impala.api import impala_connect
+from third_party.ibis import ibis_engines
 
 if TYPE_CHECKING:
     import ibis.expr.schema as sch
@@ -99,7 +100,21 @@ except ImportError:
 try:
     from third_party.ibis.ibis_mssql.api import mssql_connect
 except ImportError:
-    mssql_connect = _raise_missing_client_error("pip install pyodbc")
+    mssql_connect = _raise_missing_client_error(
+        "pip install 'google-pso-data-validator[mssql]' (pyodbc and an ODBC driver)"
+    )
+
+try:
+    from third_party.ibis.ibis_postgres import postgres_connect
+except ImportError:
+    postgres_connect = _raise_missing_client_error("pip install 'psycopg[binary]'")
+
+try:
+    from third_party.ibis.ibis_mysql import mysql_connect
+except ImportError:
+    mysql_connect = _raise_missing_client_error(
+        "pip install 'google-pso-data-validator[mysql]' (mysqlclient)"
+    )
 
 
 def get_google_bigquery_client(
@@ -305,7 +320,7 @@ def get_ibis_table(client, schema_name, table_name, database_name=None):
     elif client.name in ["oracle", "postgres", "mssql"]:
         return client.table(table_name, database=(database_name, schema_name)
                             if database_name else schema_name)
-    elif client.name == "duckdb":
+    elif client.name in ("duckdb", "sqlite", "polars", "datafusion") and not schema_name:
         return client.table(table_name)
     else:
         return client.table(table_name, database=schema_name)
@@ -340,6 +355,14 @@ def get_ibis_table_schema(
         return client.get_schema(table_name, catalog=database_name, database=schema_name)
     else:
         return client.get_schema(table_name, database=schema_name)
+
+
+def list_primary_key_columns(client, schema_name: str, table_name: str):
+    """The primary key of `schema_name`.`table_name`, or None where the backend has no
+    lookup of DVT's own (ibis 12's Trino, ClickHouse, ...)."""
+    if not hasattr(client, "list_primary_key_columns"):
+        return None
+    return client.list_primary_key_columns(schema_name, table_name)
 
 
 def get_ibis_query_schema(client, query_str) -> "sch.Schema":
@@ -508,13 +531,27 @@ CLIENT_LOOKUP = {
     consts.SOURCE_TYPE_BIGQUERY: get_bigquery_client,
     consts.SOURCE_TYPE_DATABRICKS: databricks_connect,
     consts.SOURCE_TYPE_IMPALA: impala_connect,
-    # an engine whose ibis extra isn't installed fails when connected, naming the extra
-    consts.SOURCE_TYPE_MYSQL: lambda **kwargs: ibis.mysql.connect(**kwargs),
+    consts.SOURCE_TYPE_MYSQL: mysql_connect,
     consts.SOURCE_TYPE_ORACLE: oracle_connect,
     consts.SOURCE_TYPE_FILESYSTEM: get_pandas_client,
-    consts.SOURCE_TYPE_POSTGRES: lambda **kwargs: ibis.postgres.connect(**kwargs),
+    consts.SOURCE_TYPE_POSTGRES: postgres_connect,
     consts.SOURCE_TYPE_REDSHIFT: redshift_connect,
     consts.SOURCE_TYPE_TERADATA: teradata_connect,
     consts.SOURCE_TYPE_MSSQL: mssql_connect,
     consts.SOURCE_TYPE_SNOWFLAKE: snowflake_connect,
+    # ibis 12's other engines; one whose ibis extra isn't installed fails when connected
+    consts.SOURCE_TYPE_ATHENA: ibis_engines.athena_connect,
+    consts.SOURCE_TYPE_CLICKHOUSE: ibis_engines.clickhouse_connect,
+    consts.SOURCE_TYPE_DATAFUSION: ibis_engines.datafusion_connect,
+    consts.SOURCE_TYPE_DRUID: ibis_engines.druid_connect,
+    consts.SOURCE_TYPE_DUCKDB: ibis_engines.duckdb_connect,
+    consts.SOURCE_TYPE_EXASOL: ibis_engines.exasol_connect,
+    consts.SOURCE_TYPE_FLINK: ibis_engines.flink_connect,
+    consts.SOURCE_TYPE_MATERIALIZE: ibis_engines.materialize_connect,
+    consts.SOURCE_TYPE_POLARS: ibis_engines.polars_connect,
+    consts.SOURCE_TYPE_PYSPARK: ibis_engines.pyspark_connect,
+    consts.SOURCE_TYPE_RISINGWAVE: ibis_engines.risingwave_connect,
+    consts.SOURCE_TYPE_SINGLESTOREDB: ibis_engines.singlestoredb_connect,
+    consts.SOURCE_TYPE_SQLITE: ibis_engines.sqlite_connect,
+    consts.SOURCE_TYPE_TRINO: ibis_engines.trino_connect,
 }

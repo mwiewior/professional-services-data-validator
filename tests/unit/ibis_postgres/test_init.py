@@ -52,9 +52,21 @@ DVT_CORE_TYPES_CURS = (
 
 @pytest.fixture
 def module_under_test():
-    from third_party.ibis.ibis_postgres import client
+    from third_party.ibis import ibis_postgres
 
-    return client
+    return ibis_postgres
+
+
+def _connected(module_under_test, description=(), rows=()):
+    """A backend whose psycopg connection is a mock: its cursor reports `description` and
+    fetches `rows`; the cursor is returned for asserting on what ran."""
+    cursor = mock.MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.description = description
+    cursor.fetchall.return_value = list(rows)
+    backend = module_under_test.Backend()
+    backend.con = mock.Mock(cursor=mock.Mock(return_value=cursor))
+    return backend, cursor
 
 
 def test_import(module_under_test):
@@ -62,28 +74,34 @@ def test_import(module_under_test):
 
 
 def test_raw_column_metadata_no_args(module_under_test):
-    backend = module_under_test.PostgresBackend()
+    backend = module_under_test.Backend()
     with pytest.raises(AssertionError):
         _ = list(backend.raw_column_metadata(database=None, table=None, query=None))
 
 
-@mock.patch("third_party.ibis.ibis_postgres.client.PostgresBackend.begin")
-def test_raw_column_metadata_core_types(mock_begin, module_under_test):
-    mock_begin().__enter__().exec_driver_sql().cursor.description = DVT_CORE_TYPES_CURS
-    backend = module_under_test.PostgresBackend()
+TYPE_NAMES = [("integer",), ("smallint",), ("smallint",), ("integer",), ("bigint",),
+              ("numeric",), ("numeric",), ("numeric",), ("real",), ("double precision",),
+              ("character varying",), ("character",), ("text",), ("date",),
+              ("timestamp without time zone",), ("timestamp with time zone",)]
+
+
+def test_raw_column_metadata_core_types(module_under_test):
+    backend, cursor = _connected(module_under_test, DVT_CORE_TYPES_CURS, TYPE_NAMES)
     raw_types = list(
         backend.raw_column_metadata(
             database="pso_data_validator", table="dvt_core_types"
         )
     )
-    # Ensure we have 7 attributes.
+    # Ensure we have 7 attributes, PostgreSQL's own type names among them.
     assert all(len(_) == 7 for _ in raw_types)
+    assert raw_types[11] == ("col_char_2", "character", None, 2, None, None, None)
+    assert backend.is_char_type_padded(raw_types[11][1:])
+    first_sql = cursor.execute.call_args_list[0].args[0]
+    assert first_sql == 'SELECT * FROM "pso_data_validator"."dvt_core_types" t0 LIMIT 0'
 
 
-@mock.patch("third_party.ibis.ibis_postgres.client.PostgresBackend.begin")
-def test_raw_column_metadata_qry(mock_begin, module_under_test):
-    mock_begin().__enter__().exec_driver_sql().cursor.description = DVT_CORE_TYPES_CURS
-    backend = module_under_test.PostgresBackend()
+def test_raw_column_metadata_qry(module_under_test):
+    backend, cursor = _connected(module_under_test, DVT_CORE_TYPES_CURS, TYPE_NAMES)
     raw_types = list(
         backend.raw_column_metadata(
             query="SELECT * FROM pso_data_validator.dvt_core_types"
@@ -91,3 +109,12 @@ def test_raw_column_metadata_qry(mock_begin, module_under_test):
     )
     # Ensure we have 7 attributes.
     assert all(len(_) == 7 for _ in raw_types)
+    assert cursor.execute.call_args_list[0].args[0] == (
+        "SELECT * FROM (SELECT * FROM pso_data_validator.dvt_core_types) t0 LIMIT 0"
+    )
+
+
+def test_list_primary_key_columns(module_under_test):
+    backend, cursor = _connected(module_under_test, rows=[("id",)])
+    assert backend.list_primary_key_columns("app", "t") == ["id"]
+    assert cursor.execute.call_args.args[1] == ("app.t",)

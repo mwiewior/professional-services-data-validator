@@ -45,6 +45,8 @@ dependencies = [
     # DuckDB, the comparison engine: 2.0 renamed the connection's fetch_arrow_table, which
     # ibis 12.0.0 calls
     "duckdb>=1.1,<2",
+    # ibis 12's Postgres driver, with its own libpq: a slim image has none
+    "psycopg[binary]>=3.2",
     "parsy>=2.1",
     "psycopg2-binary>=2.9.9",
     "pyarrow",
@@ -58,9 +60,13 @@ dependencies = [
 _IBIS_EXTRAS = ("mssql", "mysql", "snowflake", "trino", "clickhouse", "athena", "exasol", "druid",
                 "flink", "materialize", "risingwave", "singlestoredb", "sqlite", "datafusion",
                 "polars", "pyspark")
+# what an engine needs beyond ibis's own extra: ibis 12.0.0 calls DataFusion's ScalarUDF API as
+# it was before 52, and ibis's flink extra leaves Flink itself out
+_ENGINE_PINS = {"datafusion": ["datafusion>=0.6,<52"], "flink": ["apache-flink"]}
 extras_require = {
-    **{e: f"ibis-framework[{e}]==12.0.0" for e in _IBIS_EXTRAS},
-    "all": [f"ibis-framework[{e}]==12.0.0" for e in _IBIS_EXTRAS],
+    **{e: [f"ibis-framework[{e}]==12.0.0", *_ENGINE_PINS.get(e, [])] for e in _IBIS_EXTRAS},
+    "all": [r for e in _IBIS_EXTRAS
+            for r in (f"ibis-framework[{e}]==12.0.0", *_ENGINE_PINS.get(e, []))],
     "apache-airflow": "1.10.11",
     "develop": [
         "black==26.5.1",
