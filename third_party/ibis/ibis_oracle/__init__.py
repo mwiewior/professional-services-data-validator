@@ -145,8 +145,9 @@ class Backend(OracleBackend):
     def do_connect(self, *, user: str, password: str, dsn: str, **connect_args) -> None:
         """ibis 12's connect, with the connection file's oracledb options (`connect_args`), which
         its own drops."""
+        # ibis 12's statement cache size (0), unless the connection file sets its own
         self.con = oracledb.connect(
-            dsn, user=user, password=password, stmtcachesize=0, **connect_args
+            dsn, user=user, password=password, **{"stmtcachesize": 0, **connect_args}
         )
         self._post_connect()
 

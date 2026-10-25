@@ -273,3 +273,17 @@ def test_a_connections_driver_options_reach_oracledb(module_under_test):
     assert connect.call_args.kwargs["disable_oob"] is True
     assert connect.call_args.kwargs["config_dir"] == "/tns"
     assert connect.call_args.kwargs["user"] == "u"
+
+
+def test_a_connections_own_statement_cache_size_wins(module_under_test):
+    """DVT's default statement cache (0, ibis 12's) yields to a connection file's own."""
+    from third_party.ibis.ibis_oracle.api import oracle_connect
+
+    with mock.patch("oracledb.connect") as connect, mock.patch.object(
+        module_under_test.Backend, "_post_connect"
+    ):
+        oracle_connect(host="db", user="u", password="p", database="FREEPDB1",
+                       connect_args='{"stmtcachesize": 128}')
+        assert connect.call_args.kwargs["stmtcachesize"] == 128
+        oracle_connect(host="db", user="u", password="p", database="FREEPDB1")
+        assert connect.call_args.kwargs["stmtcachesize"] == 0

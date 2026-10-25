@@ -22,6 +22,16 @@ DEFAULT_DRIVER_NAME = "ODBC Driver 17 for SQL Server"
 
 
 class Backend(MSSQLBackend):
+    def _post_connect(self):
+        super()._post_connect()
+        with closing(self.con.cursor()) as cur:
+            cur.execute("SELECT CAST(SERVERPROPERTY('ProductMajorVersion') AS INT)")
+            major = int(cur.fetchone()[0] or 0)
+        if major >= 15:  # SQL Server 2019: UTF-8 collations
+            from third_party.ibis.ibis_addon.operations import MSSQLUTF8Compiler
+
+            self.compiler = MSSQLUTF8Compiler()
+
     def _rows(self, sql: str, *params) -> list:
         with closing(self.con.cursor()) as cur:
             cur.execute(sql, *params)

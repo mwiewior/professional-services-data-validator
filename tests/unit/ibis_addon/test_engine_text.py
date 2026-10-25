@@ -81,3 +81,9 @@ def test_an_engine_without_sha256_refuses_a_hash(dialect):
     t = ibis.table({"s": "string"}, name="t")
     with pytest.raises(Exception, match="(?i)hash|HexDigest"):
         ibis.to_sql(t.select(h=t.s.hexdigest("sha256")), dialect=dialect)
+
+
+def test_duckdbs_float_text_is_oracles():
+    con = _engine("duckdb")
+    t = ibis.memtable({"f": [1.5, -2.25, 0.0, 10.0]})
+    assert list(con.execute(t.select(x=t.f.cast("string"))).x) == ["1.5", "-2.25", "0", "10"]

@@ -1,0 +1,44 @@
+# DVT's ibis 12 engine system tests: `tests/system/ibis12/run.sh` brings this up, runs the
+# tests in `runner` and takes it down. Passwords are local test ones.
+name: dvt-ibis12
+services:
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    environment: {ORACLE_PASSWORD: dvt_test_pw1}
+    healthcheck: {test: ["CMD", "healthcheck.sh"], interval: 10s, retries: 60}
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment: {ACCEPT_EULA: "Y", MSSQL_SA_PASSWORD: "Dvt_test_pw1"}
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Dvt_test_pw1 -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      retries: 60
+  postgres:
+    image: postgres:16
+    environment: {POSTGRES_PASSWORD: dvt_test_pw1, POSTGRES_DB: dvt}
+    healthcheck: {test: ["CMD", "pg_isready", "-U", "postgres"], interval: 5s, retries: 60}
+  mysql:
+    image: mysql:8.4
+    environment: {MYSQL_ROOT_PASSWORD: dvt_test_pw1, MYSQL_DATABASE: dvt}
+    healthcheck: {test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pdvt_test_pw1"], interval: 5s, retries: 60}
+  trino:
+    image: trinodb/trino:476
+    volumes: ["./trino/memory.properties:/etc/trino/catalog/memory.properties:ro"]
+    healthcheck: {test: ["CMD", "trino", "--execute", "SELECT 1"], interval: 10s, retries: 60}
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    environment: {CLICKHOUSE_USER: dvt, CLICKHOUSE_PASSWORD: dvt_test_pw1, CLICKHOUSE_DB: dvt}
+    healthcheck: {test: ["CMD", "clickhouse-client", "--user", "dvt", "--password", "dvt_test_pw1", "-q", "SELECT 1"], interval: 5s, retries: 60}
+  runner:
+    build: {context: ../../.., dockerfile: tests/system/ibis12/Dockerfile}
+    profiles: [run]
+    volumes: ["../../..:/src"]
+    environment: {DVT_IBIS12_SYSTEM: "1"}
+    depends_on:
+      oracle: {condition: service_healthy}
+      mssql: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      mysql: {condition: service_healthy}
+      trino: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}

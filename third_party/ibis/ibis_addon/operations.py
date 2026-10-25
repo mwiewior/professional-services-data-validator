@@ -452,9 +452,22 @@ def _mssql_cast(self, op, original, *, arg, to):
     return original()
 
 
+# SQL Server 2019's UTF-8 collation: text converted to VARCHAR through it is its UTF-8 bytes
+MSSQL_UTF8_COLLATION = "Latin1_General_100_CI_AS_SC_UTF8"
+
+
+class MSSQLUTF8Compiler(MSSQLCompiler):
+    """SQL Server 2019 and later (the fork's backend picks it on connect): a hash reads text as
+    its UTF-8 bytes, as Oracle's does; an older server's VARCHAR keeps its code page only."""
+
+    dvt_utf8 = True
+
+
 def _mssql_hex_digest(self, op, *, arg, how):
     if how != "sha256":
         raise NotImplementedError(f"No available hashing function for {how}")
+    if getattr(self, "dvt_utf8", False):
+        arg = sge.Collate(this=arg, expression=sge.Var(this=MSSQL_UTF8_COLLATION))
     hashed = self.f.hashbytes(sge.convert("SHA2_256"),
                               self.f.convert(_mssql_type("VARCHAR(MAX)"), arg))
     return self.f.lower(self.f.convert(_mssql_type("CHAR(64)"), hashed, sge.convert(2)))
@@ -487,7 +500,8 @@ def _mssql_binary_length(self, op, *, arg):
 
 
 def _mssql_rstrip(self, op, *, arg):
-    return self.f.rtrim(self.cast(arg, dt.String()))
+    # NVARCHAR: a VARCHAR keeps only the database code page's characters
+    return self.f.rtrim(self.f.convert(_mssql_type("NVARCHAR(MAX)"), arg))
 
 
 def _mssql_string_join(self, op, original, **kw):
@@ -523,6 +537,12 @@ _method(MSSQLCompiler, "RandomScalar", lambda self, op, **kw: self.f.newid())
 _wrap(MSSQLCompiler, "StringJoin", _mssql_string_join)
 _wrap(MSSQLCompiler, "Sum", _mssql_sum)
 _wrap(MSSQLCompiler, "Mean", _mssql_mean)
+# the UTF-8 compiler is its own class, which ibis gives its own simple-operation methods: it
+# takes each of DVT's SQL Server rules as they are (wrapped ones once)
+for _name in ("Cast", "HexDigest", "Strftime", "ExtractEpochSeconds", "StringLength",
+              "PaddedCharLength", "BinaryLength", "RStrip", "RandomScalar", "StringJoin", "Sum",
+              "Mean"):
+    setattr(MSSQLUTF8Compiler, f"visit_{_name}", getattr(MSSQLCompiler, f"visit_{_name}"))
 
 # --- Snowflake --------------------------------------------------------------------------------
 
@@ -568,16 +588,24 @@ _wrap(DuckDBCompiler, "Cast", _duckdb_cast)
 # --- ibis 12's other engines ------------------------------------------------------------------
 
 # the strftime tokens DVT's validations write (config_manager._strftime_format)
-_STRFTIME_TOKENS = {"%Y": ("YYYY", "yyyy"), "%m": ("MM", "MM"), "%d": ("DD", "dd"),
-                    "%H": ("HH24", "HH"), "%M": ("MI", "mm"), "%S": ("SS", "ss")}
+# (Oracle-like, Java-like, MySQL-like as Trino's, ClickHouse's): %M is minutes in Python's
+# and a month's name in MySQL's, which ibis passes on to Trino and ClickHouse as it is
+_STRFTIME_TOKENS = {"%Y": ("YYYY", "yyyy", "%Y", "%Y"), "%m": ("MM", "MM", "%m", "%m"),
+                    "%d": ("DD", "dd", "%d", "%d"), "%H": ("HH24", "HH", "%H", "%H"),
+                    "%M": ("MI", "mm", "%i", "%i"), "%S": ("SS", "ss", "%s", "%S")}
 
 
 def _translated_format(fmt: str, which: int) -> str:
-    for token, forms in _STRFTIME_TOKENS.items():
-        fmt = fmt.replace(token, forms[which])
-    if "%" in fmt:
-        raise NotImplementedError(f"No translation of strftime format {fmt!r}")
-    return fmt
+    out, i = "", 0
+    while i < len(fmt):
+        token = fmt[i:i + 2]
+        if token.startswith("%"):
+            if token not in _STRFTIME_TOKENS:
+                raise NotImplementedError(f"No translation of strftime format {fmt!r}")
+            out, i = out + _STRFTIME_TOKENS[token][which], i + 2
+        else:
+            out, i = out + fmt[i], i + 1
+    return out
 
 
 def _oracle_like_format(fmt: str) -> str:
@@ -598,14 +626,17 @@ def _trimmed_decimal_text(self, text):
                     trim(trim(text, "0"), "."), text)
 
 
-def _cast_with(hex_text):
+def _cast_with(hex_text, float_text=None):
     """A Cast rule: a decimal's text without trailing zeros, a binary's as `hex_text(self, arg)`
-    (its lower-case hex; None: ibis's own)."""
+    (its lower-case hex; None: ibis's own), a float's as `float_text(self, arg, original)`
+    (None: ibis's own)."""
 
     def cast(self, op, original, *, arg, to):
         from_ = op.arg.dtype
         if from_.is_decimal() and to.is_string():
             return _trimmed_decimal_text(self, original())
+        if float_text is not None and from_.is_floating() and to.is_string():
+            return float_text(self, arg, original)
         if hex_text is not None and from_.is_binary() and to.is_string():
             return hex_text(self, arg)
         return original()
@@ -647,11 +678,18 @@ _ENGINE_TEXT = {
     ExasolCompiler: (None, lambda self, arg: self.f.lower(self.f.hash_sha256(arg))),
     DruidCompiler: (None, None),
 }
+# a float's text as Oracle's (1.5, 0): Trino's own is scientific (1.5E0), DuckDB's keeps .0
+_FLOAT_TEXT = {
+    TrinoCompiler: lambda self, arg, original: _trimmed_decimal_text(
+        self, self.f.format(sge.convert("%s"), arg)),
+    DuckDBCompiler: lambda self, arg, original: _trimmed_decimal_text(self, original()),
+}
 for _compiler, (_hex, _sha256) in _ENGINE_TEXT.items():
     if _compiler is DuckDBCompiler:
-        _wrap(_compiler, "Cast", _cast_with(None))  # after the binary rule above
+        # after the binary rule above
+        _wrap(_compiler, "Cast", _cast_with(None, _FLOAT_TEXT[DuckDBCompiler]))
         continue
-    _wrap(_compiler, "Cast", _cast_with(_hex))
+    _wrap(_compiler, "Cast", _cast_with(_hex, _FLOAT_TEXT.get(_compiler)))
     if _sha256 is not None:
         _method(_compiler, "HexDigest", _sha256_only(_sha256))
 _method(SQLiteCompiler, "HexDigest", _no_sha256("SQLite"))
@@ -660,6 +698,11 @@ _method(ExasolCompiler, "Strftime", lambda self, op, *, arg, format_str: self.f.
     arg, sge.convert(_oracle_like_format(op.format_str.value))))
 _method(DruidCompiler, "Strftime", lambda self, op, *, arg, format_str: self.f.time_format(
     arg, sge.convert(_java_like_format(op.format_str.value))))
+
+_method(TrinoCompiler, "Strftime", lambda self, op, *, arg, format_str: self.f.date_format(
+    arg, sge.convert(_translated_format(op.format_str.value, 2))))
+_method(ClickHouseCompiler, "Strftime", lambda self, op, *, arg, format_str: self.f.formatDateTime(
+    arg, sge.convert(_translated_format(op.format_str.value, 3))))
 
 # SingleStoreDB is MySQL's SQL, but its compiler marks a hash unsupported on its own class
 _wrap(SingleStoreDBCompiler, "Cast", _mysql_cast)

@@ -122,7 +122,7 @@ RSTRIP = {
     "oracle": "rtrim(t0.s, ' ' || chr(9) || chr(10) || chr(13) || chr(11) || chr(12))",
     "impala": "trim(trailing ' ' || chr(9) || chr(10) || chr(13) || chr(11) || chr(12) from t0.s)",
     "databricks": "trim(trailing ' ' || chr(9) || chr(10) || chr(13) || chr(11) || chr(12) from t0.s)",
-    "mssql": "rtrim(cast(t0.s as varchar(max)))",
+    "mssql": "rtrim(convert(nvarchar(max), t0.s))",
 }
 
 
@@ -186,6 +186,9 @@ def test_an_integer_sum_and_mean_on_sql_server_avoid_int_overflow_and_truncation
 @pytest.mark.parametrize("dialect,expected", [
     ("exasol", "to_char(t0.ts, 'yyyy-mm-dd hh24:mi:ss')"),
     ("druid", "time_format(t0.ts, 'yyyy-mm-dd hh:mm:ss')"),
+    # MySQL-like formats: minutes are %i, %M is a month's name
+    ("trino", "date_format(t0.ts, '%y-%m-%d %t')"),  # %T: hh:mm:ss, sqlglot's form of %H:%i:%s
+    ("clickhouse", "formatdatetime(t0.ts, '%y-%m-%d %h:%i:%s')"),
 ])
 def test_strftime_on_engines_without_ibis_own(dialect, expected):
     assert expected in _sql(TABLE.ts.strftime("%Y-%m-%d %H:%M:%S").name("x"), dialect)
@@ -202,3 +205,18 @@ def test_singlestoredb_has_mysqls_rules():
     expr = TABLE.select(h=TABLE.s.hexdigest("sha256"), x=TABLE.b.cast("string"))
     sql = _norm(compiler.to_sqlglot(expr).sql(compiler.dialect))
     assert "sha2(t0.s, '256')" in sql and "lower(hex(t0.b))" in sql
+
+
+def test_a_float_on_trino_is_its_plain_text_not_scientific():
+    sql = _sql(TABLE.f.cast("string").name("x"), "trino")
+    assert "format('%s', t0.f)" in sql
+
+
+def test_sql_server_2019_hashes_text_through_a_utf8_collation():
+    from third_party.ibis.ibis_addon.operations import MSSQLUTF8Compiler
+
+    compiler = MSSQLUTF8Compiler()
+    sql = _norm(compiler.to_sqlglot(TABLE.select(h=TABLE.s.hexdigest("sha256"))).sql(
+        compiler.dialect))
+    assert "convert(varchar(max), t0.s collate latin1_general_100_ci_as_sc_utf8)" in sql
+    assert "collate" not in _sql(TABLE.s.hexdigest("sha256").name("h"), "mssql")
