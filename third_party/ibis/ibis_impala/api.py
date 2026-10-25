@@ -20,6 +20,7 @@ from typing import Literal
 
 import ibis
 import ibis.expr.datatypes as dt
+import impala.dbapi as impyla
 import ibis.expr.schema as sch
 from ibis.backends.impala import Backend as ImpalaBackend
 
@@ -61,7 +62,29 @@ def update_query_with_limit(query):
     return query + " LIMIT 1"
 
 
+class _AsUser:
+    """An impyla connection whose cursors run as the connection's user: ibis 12 opens them with
+    none, and impyla then asks the OS, which fails for a container uid without a passwd entry."""
+
+    def __init__(self, con, user):
+        self._con, self._user = con, user
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+    def cursor(self, user=None, **kwargs):
+        return self._con.cursor(user=user or self._user, **kwargs)
+
+
 class Backend(ImpalaBackend):
+    def do_connect(self, *args, user: str = None, **kwargs):
+        connect = impyla.connect
+        impyla.connect = lambda *a, **kw: _AsUser(connect(*a, **kw), user)
+        try:
+            super().do_connect(*args, user=user, **kwargs)
+        finally:
+            impyla.connect = connect
+
     def get_schema(self, table_name, *, catalog=None, database=None) -> sch.Schema:
         name = f"`{database}`.`{table_name}`" if database else f"`{table_name}`"
         with self.con.cursor() as cur:
