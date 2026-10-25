@@ -19,24 +19,20 @@ DVT supports the following validations:
 * Custom Query validation
 * Ad hoc SQL exploration
 
-DVT supports the following connection types:
+DVT supports the following connection types. This fork runs on ibis 12, and how far each
+engine is proven differs:
 
-*   [AlloyDB](docs/connections.md#alloydb)
-*   [BigQuery](docs/connections.md#google-bigquery)
-*   [Db2 LUW](docs/connections.md#db2_luw)
-*   [Db2 z/OS](docs/connections.md#db2_zos)
-*   [FileSystem](docs/connections.md#filesystem)
-*   [Hive](docs/connections.md#hive)
-*   [Impala](docs/connections.md#impala)
-*   [MSSQL](docs/connections.md#mssql-server)
-*   [MySQL](docs/connections.md#mysql)
-*   [Oracle](docs/connections.md#oracle)
-*   [Postgres](docs/connections.md#postgres)
-*   [Redshift](docs/connections.md#redshift)
-*   [Spanner](docs/connections.md#google-spanner)
-*   [Snowflake](docs/connections.md#snowflake)
-*   [Sybase ASE](docs/connections.md#sybase)
-*   [Teradata](docs/connections.md#teradata)
+| Connection type | Proven by |
+|---|---|
+| [Oracle](docs/connections.md#oracle), [BigQuery](docs/connections.md#google-bigquery) (and its emulator), [Impala](docs/connections.md#impala) (and a Spark Thrift server), Databricks (SQL warehouses) | the Axis migration tool's live suites and a real Databricks SQL warehouse |
+| [MSSQL](docs/connections.md#mssql-server), [Postgres](docs/connections.md#postgres), [MySQL](docs/connections.md#mysql), Trino, ClickHouse, DuckDB | Docker system tests (`tests/system/ibis12/run.sh`): schema, column and row validations, equal tables and a changed cell, each engine against itself and against Oracle |
+| [Snowflake](docs/connections.md#snowflake), Athena, Exasol, Druid, Materialize, RisingWave, SingleStoreDB, SQLite, DataFusion, Polars, PySpark, Flink | compile tests of DVT's rules (`tests/unit/ibis_addon`); SQLite, DataFusion and DuckDB's rules also executed |
+| [FileSystem](docs/connections.md#filesystem) | unit tests, read through DuckDB |
+
+The engines beyond Oracle, BigQuery, Impala, Databricks, Postgres and DuckDB need their extra,
+`pip install 'google-pso-data-validator[<engine>]'` (or `[all]`). SQLite and Druid have no
+SHA-256 function, so they refuse a hash validation. Redshift and Teradata, which ibis 12 has no
+backend for, raise until they are ported; Db2, Db2 z/OS, Sybase and Spanner were removed.
 
 The [Connections](docs/connections.md) page provides details about how to create
 and list connections for the validation tool.
