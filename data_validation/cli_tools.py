@@ -266,6 +266,7 @@ CONNECTION_SOURCE_FIELDS = {
         ["token", "Personal access token (DATABRICKS_TOKEN if not provided)"],
         ["catalog", "Unity Catalog catalog (the workspace's default if not provided)"],
         ["schema", "Schema (default if not provided)"],
+        ["statement_timeout", "Seconds after which the warehouse cancels a statement"],
     ],
     consts.SOURCE_TYPE_IMPALA: [
         ["host", "Impala host"],

@@ -41,9 +41,11 @@ def databricks_connect(
     token: str = None,
     catalog: str = None,
     schema: str = "default",
+    statement_timeout: str = None,
 ):
     """A Databricks SQL warehouse (or cluster) at `host` and `http_path`, authenticated with a
-    personal access token (`token`, else `DATABRICKS_TOKEN`)."""
+    personal access token (`token`, else `DATABRICKS_TOKEN`); with `statement_timeout`
+    (seconds), the warehouse cancels any statement of the session that runs longer."""
     backend = Backend()
     backend.do_connect(
         server_hostname=host.removeprefix("https://").rstrip("/"),
@@ -51,6 +53,9 @@ def databricks_connect(
         access_token=token,
         catalog=catalog,
         schema=schema,
+        session_configuration={"STATEMENT_TIMEOUT": str(statement_timeout)}
+        if statement_timeout
+        else None,
         # a name of DVT's own: ibis names it after the OS user, which a container's uid may lack
         memtable_volume="dvt",
     )

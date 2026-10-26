@@ -38,3 +38,25 @@ def test_a_connection_creates_nothing_in_the_workspace():
     assert not any("VOLUME" in s.upper() for s in statements), statements
     assert connect.call_args.kwargs["server_hostname"] == "dbc-x.cloud.databricks.com"
     assert connect.call_args.kwargs["catalog"] == "axis"
+
+
+def _connect(**kw):
+    con = mock.MagicMock()
+    cursor = con.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value = cursor
+    cursor.fetchall.return_value = [("axis",)]
+    with mock.patch("databricks.sql.connect", return_value=con) as connect:
+        databricks_connect(host="h", http_path="/p", token="t", catalog="axis", **kw)
+    return connect.call_args.kwargs
+
+
+def test_a_statement_timeout_holds_every_statement_of_the_session():
+    """A caller's cost guard: the warehouse cancels any statement past it (seconds)."""
+    assert _connect(statement_timeout="900")["session_configuration"] == {
+        "STATEMENT_TIMEOUT": "900"
+    }
+    assert _connect(statement_timeout=60)["session_configuration"] == {"STATEMENT_TIMEOUT": "60"}
+
+
+def test_no_statement_timeout_leaves_the_warehouses_own():
+    assert _connect().get("session_configuration") is None
