@@ -53,9 +53,9 @@ def databricks_connect(
         access_token=token,
         catalog=catalog,
         schema=schema,
-        session_configuration={"STATEMENT_TIMEOUT": str(statement_timeout)}
-        if statement_timeout
-        else None,
+        session_configuration=(
+            {"STATEMENT_TIMEOUT": str(statement_timeout)} if statement_timeout else None
+        ),
         # a name of DVT's own: ibis names it after the OS user, which a container's uid may lack
         memtable_volume="dvt",
     )
