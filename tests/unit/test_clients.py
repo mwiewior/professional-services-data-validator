@@ -115,6 +115,32 @@ def test_get_bigquery_client_sets_user_agent():
     assert "google-pso-tool/data-validator" in user_agent
 
 
+def test_get_bigquery_client_puts_labels_and_byte_cap_on_every_query_job():
+    """A BigQuery connection's `labels` and `maximum_bytes_billed` land on the client's
+    default_query_job_config, so every query job DVT runs carries both."""
+    ibis_client = clients.get_data_client(
+        {
+            "source_type": "BigQuery",
+            "project_id": "test-project",
+            "anonymous_credentials": True,
+            "labels": {"team": "data", "run": "run-1"},
+            "maximum_bytes_billed": 1073741824,
+        }
+    )
+    job_config = ibis_client.client.default_query_job_config
+    assert job_config.labels == {"team": "data", "run": "run-1"}
+    assert job_config.maximum_bytes_billed == 1073741824
+
+
+def test_get_bigquery_client_without_labels_or_byte_cap_sets_neither():
+    ibis_client = clients.get_bigquery_client(
+        "test-project", anonymous_credentials=True
+    )
+    job_config = ibis_client.client.default_query_job_config
+    assert job_config.labels == {}
+    assert job_config.maximum_bytes_billed is None
+
+
 def test_get_google_bqstorage_client_insecure_channel_builds_a_plaintext_transport():
     """--storage-api-insecure-channel: a local BigQuery emulator serves its Storage API gRPC
     port without TLS, so the client must be built from an insecure channel/transport rather than

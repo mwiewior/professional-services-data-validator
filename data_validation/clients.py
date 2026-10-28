@@ -122,11 +122,19 @@ def get_google_bigquery_client(
     credentials=None,
     api_endpoint: Optional[str] = None,
     quota_project_id: Optional[str] = None,
+    labels: Optional[dict] = None,
+    maximum_bytes_billed: Optional[int] = None,
 ):
     info = client_info.get_http_client_info()
     job_config = bigquery.QueryJobConfig(
         connection_properties=[bigquery.ConnectionProperty("time_zone", "UTC")]
     )
+    # labels and maximum_bytes_billed go on every query job, so a caller can find and cap
+    # what DVT bills in BigQuery's job history (each set only when given: None is not unset)
+    if labels:
+        job_config.labels = labels
+    if maximum_bytes_billed is not None:
+        job_config.maximum_bytes_billed = maximum_bytes_billed
     options = None
     if api_endpoint or quota_project_id:
         options = client_options.ClientOptions(
@@ -186,6 +194,8 @@ def get_bigquery_client(
     anonymous_credentials: bool = False,
     client_project_id: Optional[str] = None,  # to be deprecated in the future
     billing_project_id: Optional[str] = None,
+    labels: Optional[dict] = None,
+    maximum_bytes_billed: Optional[int] = None,
 ):
     if client_project_id:
         logging.warning(
@@ -206,6 +216,8 @@ def get_bigquery_client(
         # application-default credentials, the very lookup anonymous mode exists to avoid
         quota_project_id=billing_project_id
         or (project_id if anonymous_credentials else None),
+        labels=labels,
+        maximum_bytes_billed=maximum_bytes_billed,
     )
     bqstorage_client = None
     if storage_api_endpoint and not storage_api_disabled:
